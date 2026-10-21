@@ -53,11 +53,12 @@ Ask "help me free up space in ~/Downloads". Claude suggests items worth a look, 
   - **Move N items to Trash** — the same as dragging them to the Trash. **Undo:** Finder's **Put Back** (the receipt has an **Open Trash** button). Space is freed when you empty the Trash.
   - **Delete permanently, free X now** — only offered for items marked Safe to clear (like `node_modules`, unfinished downloads or an installer copy of an app you have), and only after a second "This can't be undone" confirmation. **No undo.**
   - **Remove N downloads (keep in iCloud)** — for iCloud Drive files: removes the copy on this Mac and keeps the file in iCloud, where it downloads again when you open it. Nothing is lost.
+- **iCloud Drive, Desktop and Documents:** for items synced with iCloud, **Move to Trash** and **Delete permanently** remove them from iCloud and from every device signed in to it. Only **Remove Download** keeps the file in iCloud.
 - A receipt lists what was done, what was left alone and anything that didn't finish, with your free space before and after. The map then rescans.
 
 Two **optional checks** are off until you switch them on in the view, and read a little file data on your Mac when on:
 
-- **Check git repositories** runs `git status` in repositories inside the folder (and reads the remote's host name) so a project can be marked "Pushed, nothing unsaved". It does not fetch or change anything.
+- **Check git repositories** runs `git status` in repositories inside the folder (and reads the remote's host name) so a project can be marked "Pushed, nothing unsaved". It does not fetch or change anything, and it skips (never marks as pushed) any repository whose own settings could make git run a command, such as fsmonitor or filter drivers.
 - **Find exact duplicates** compares the contents of same-size files (1 MB or more) by computing a checksum on your Mac. Contents and checksums are never sent anywhere.
 
 ## Privacy
