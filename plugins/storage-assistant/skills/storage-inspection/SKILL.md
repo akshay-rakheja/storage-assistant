@@ -12,3 +12,5 @@ Use only this plugin's `storage_*` tools for storage questions. Never substitute
 5. A finished scan already shows the treemap; do not call `storage_render_view` after it. Use `storage_render_view` only when the person asks to see a subfolder (`withinNodeId`), the other size measure or file types. If the person wants real names in a bigger view, call `storage_open_local_view`.
 
 Apparent size, allocated estimate and reclaimable space are different; APFS clones and snapshots mean allocation is an estimate. There is no content reading and no deletion capability: decline those requests and do not reach for other tools. `storage_release_scope` purges the snapshot. The grant expires after 30 minutes.
+
+When the person wants to free space, call storage_suggest_cleanup after a scan. Explain the top candidates and their reasons. You cannot delete, move or evict anything: the person reviews and clicks in the view. Never claim something was deleted unless they tell you or a receipt says so.

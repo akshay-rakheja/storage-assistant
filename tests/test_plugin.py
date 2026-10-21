@@ -16,6 +16,9 @@ ROOT = Path(__file__).resolve().parent.parent
 UI = {"extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}}}
 
 
+VIEW_ONLY = ("storage_cleanup_preview", "storage_cleanup_execute", "storage_cleanup_settings")
+
+
 class PluginTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -55,7 +58,7 @@ class PluginTests(unittest.TestCase):
         self.assertFalse(tools["storage_choose_folder"]["inputSchema"]["additionalProperties"])
         self.assertEqual(tools["storage_render_view"]["_meta"]["ui"]["resourceUri"], UI_URI)
         self.assertEqual(tools["storage_start_scan"]["_meta"]["ui"]["resourceUri"], UI_URI)
-        self.assertTrue(all(t["annotations"]["readOnlyHint"] for t in tools.values()))
+        self.assertTrue(all(t["annotations"]["readOnlyHint"] for n, t in tools.items() if n not in VIEW_ONLY))
         self.assertEqual(self.rpc("resources/list")["result"]["resources"][0]["uri"], UI_URI)
         plain = Plugin(chooser=lambda: None, opener=lambda url: True)
         try:
@@ -65,6 +68,32 @@ class PluginTests(unittest.TestCase):
             self.assertEqual(render["_meta"]["ui"]["resourceUri"], UI_URI)
         finally:
             plain.close()
+
+    def test_cleanup_tools_listed_with_visibility(self):
+        self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": UI})
+        tools = {t["name"]: t for t in self.rpc("tools/list")["result"]["tools"]}
+        for name in VIEW_ONLY:
+            self.assertEqual(tools[name]["_meta"], {"ui": {"visibility": ["app"]}})
+            self.assertTrue(tools[name]["description"].startswith(
+                "View-only: called by the Storage Assistant view after the person clicks."))
+            self.assertFalse(tools[name]["annotations"]["readOnlyHint"])
+        suggest = tools["storage_suggest_cleanup"]
+        self.assertNotIn("visibility", suggest["_meta"]["ui"])
+        self.assertEqual(suggest["_meta"]["ui"]["resourceUri"], UI_URI)
+        self.assertTrue(suggest["annotations"]["readOnlyHint"])
+
+    def test_suggest_returns_candidates_and_view(self):
+        status = self.scanned(UI)
+        result = self.tool("storage_suggest_cleanup", {"scanId": status["scanId"], "scanVersion": status["scanVersion"]})
+        self.assertTrue(result["ok"], result)
+        self.assertIn("candidates", result["data"])
+        self.assertIn("view", result["data"])
+
+    def test_execute_via_protocol_requires_preview_token(self):
+        self.scanned(UI)
+        result = self.tool("storage_cleanup_execute", {"token": "ab" * 16})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "INVALID_INPUT")
 
     def test_picker_flow_returns_names_paths_and_treemap(self):
         status = self.scanned(UI)
