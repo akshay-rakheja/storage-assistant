@@ -13,24 +13,14 @@
 <label><span class="visually-hidden">Measure</span><select id="basis"><option value="logical">File size</option><option value="allocated_estimate">Space on disk</option></select></label>
 <label><span class="visually-hidden">Group by</span><select id="aggregate"><option value="children">Items</option><option value="by_category">File types</option></select></label>
 <button id="refresh" type="button">Refresh</button>
+<button id="suggest" type="button" class="primary" hidden>Suggest what to clear</button>
 </div>
 <div id="map" role="group" aria-label="Treemap of this folder"></div>
 <ul id="legend" aria-label="Colour key"></ul>
-<p id="coverage"></p>
+<p id="cleanup-status" role="status"></p>
 <table><caption id="caption" class="visually-hidden">Items in this folder</caption>
 <thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col" class="num">Size</th></tr></thead><tbody id="rows"></tbody></table>
-<div class="pager"><button id="first" type="button">Back to the largest</button><button id="next" type="button">Show more</button><button id="share" type="button">Ask about the selected item</button></div>
-<p id="selection" role="status"></p>
-<section id="cleanup" hidden aria-labelledby="cleanup-title">
-<h2 id="cleanup-title">Suggestions</h2>
-<p class="hint">Ticked items are only changed after you review them and click. Labels describe evidence; check anything you are unsure about.</p>
-<ul id="candidates" aria-label="Suggested items"></ul>
-<fieldset class="optins"><legend>Optional checks</legend>
-<label><input type="checkbox" id="optin-git"> Check git repositories (pushed, nothing unsaved)</label>
-<label><input type="checkbox" id="optin-dup"> Find exact duplicates (compares file contents on this Mac)</label>
-</fieldset>
-<p id="cleanup-status" role="status"></p>
-</section>
+<div class="pager"><button id="next" type="button">Show more</button><button id="first" type="button">Show fewer</button></div>
 <section id="review" class="panel" hidden aria-labelledby="review-title">
 <h2 id="review-title" tabindex="-1">Review</h2>
 <ul id="review-items"></ul>
@@ -57,8 +47,6 @@
 <p id="receipt-hint" class="quiet">Use Put Back in Finder to restore</p>
 <p id="receipt-status" role="status"></p>
 </section>
+<p class="fine"><span id="coverage"></span> File contents are never opened, and nothing changes until you review and click. Sizes are estimates of the space a delete frees.</p>
 <div id="tray" hidden><span id="tray-text"></span><button id="tray-review" type="button" class="primary">Review…</button></div>
-<details><summary>About these numbers</summary>
-<p>Names, sizes and dates of the folder you chose. File contents are never opened; files change only when you click an action in the clean-up panel.</p>
-<ul id="caveats"></ul></details>
 </section></main><script>/* BUNDLED_SCRIPT */</script></body></html>

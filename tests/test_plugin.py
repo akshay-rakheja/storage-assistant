@@ -78,9 +78,18 @@ class PluginTests(unittest.TestCase):
                 "View-only: called by the Storage Assistant view after the person clicks."))
             self.assertFalse(tools[name]["annotations"]["readOnlyHint"])
         suggest = tools["storage_suggest_cleanup"]
-        self.assertNotIn("visibility", suggest["_meta"]["ui"])
-        self.assertEqual(suggest["_meta"]["ui"]["resourceUri"], UI_URI)
+        self.assertNotIn("_meta", suggest)
         self.assertTrue(suggest["annotations"]["readOnlyHint"])
+
+    def test_only_scan_and_render_show_a_view(self):
+        """One view per turn: a scan plus suggestions in the same turn must not open a second view."""
+        self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": UI})
+        tools = self.rpc("tools/list")["result"]["tools"]
+        with_view = {t["name"] for t in tools if t.get("_meta", {}).get("ui", {}).get("resourceUri")}
+        self.assertEqual(with_view, {"storage_start_scan", "storage_render_view"})
+        for name in with_view:
+            schema = next(t for t in tools if t["name"] == name)["inputSchema"]
+            self.assertEqual(schema["properties"]["freeUpSpace"], {"type": "boolean"})
 
     def test_non_apps_client_gets_no_action_tools(self):
         """C1: without MCP Apps there is no view to click, so the model never sees or reaches the action tools."""
@@ -116,12 +125,37 @@ class PluginTests(unittest.TestCase):
         body = self.tool("storage_cleanup_settings", {"optIn": {"gitHealth": False}})
         self.assertTrue(body["ok"], body)
 
-    def test_suggest_returns_candidates_and_view(self):
+    def test_suggest_returns_candidates_without_a_view(self):
         status = self.scanned(UI)
         result = self.tool("storage_suggest_cleanup", {"scanId": status["scanId"], "scanVersion": status["scanVersion"]})
         self.assertTrue(result["ok"], result)
         self.assertIn("candidates", result["data"])
-        self.assertIn("view", result["data"])
+        self.assertNotIn("view", result["data"])
+
+    def test_free_up_space_puts_suggestions_in_the_one_view(self):
+        status = self.scanned(UI)
+        snapshot = {"scanId": status["scanId"], "scanVersion": status["scanVersion"]}
+        shown = self.tool("storage_render_view", snapshot | {"basis": "logical", "freeUpSpace": True})
+        self.assertTrue(shown["ok"], shown)
+        self.assertIn("view", shown["data"])
+        self.assertIn("candidates", shown["data"])
+        self.assertTrue(shown["data"]["freeUpSpace"])
+        plain = self.tool("storage_render_view", snapshot | {"basis": "logical"})
+        self.assertNotIn("candidates", plain["data"])
+        grant = self.tool("storage_list_scopes")["data"]["scopes"][0]["grantId"]
+        started = self.tool("storage_start_scan", {"grantId": grant, "requestId": opaque(), "freeUpSpace": True})
+        self.assertTrue(started["ok"], started)
+        self.assertTrue(started["data"]["freeUpSpace"])
+        if started["data"]["state"] != "running":
+            self.assertIn("candidates", started["data"])
+
+    def test_person_can_ask_for_optional_checks_in_chat(self):
+        status = self.scanned(UI)
+        snapshot = {"scanId": status["scanId"], "scanVersion": status["scanVersion"]}
+        result = self.tool("storage_suggest_cleanup", snapshot | {"checks": {"exactDuplicates": True}})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.plugin.cleanup.opt_in, {"exactDuplicates"})
+        self.assertEqual(result["data"]["checks"], {"gitHealth": False, "exactDuplicates": True})
 
     def test_execute_via_protocol_requires_preview_token(self):
         self.scanned(UI)
@@ -132,9 +166,9 @@ class PluginTests(unittest.TestCase):
     def test_ui_bundle_has_cleanup_controls(self):
         self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": UI})
         html = self.rpc("resources/read", {"uri": UI_URI})["result"]["contents"][0]["text"]
-        for marker in ('id="tray"', 'id="review"', 'id="confirm-delete"', 'id="receipt"', 'id="optin-git"', 'id="optin-dup"',
+        for marker in ('id="tray"', 'id="review"', 'id="confirm-delete"', 'id="receipt"',
                        "Move ", " items to Trash", "Delete permanently", "This can't be undone.", "Open Trash",
-                       "Safe to clear", "Worth a glance", "Review…", "Use Put Back in Finder to restore",
+                       "Safe to clear", "Worth a glance", "Review…", 'id="suggest"', "Suggest what to clear", "Use Put Back in Finder to restore",
                        'aria-modal="true"', "The result is unknown", "Refresh the map"):
             self.assertIn(marker, html)
         self.assertNotIn("fetch(", html)

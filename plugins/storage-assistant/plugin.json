@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "storage-assistant",
-  "version": "0.6.0",
+  "version": "0.6.3",
   "description": "See what's taking up space in a folder on your Mac as a treemap, and clear it with one click: Move to Trash, Delete permanently or Remove Download. Nothing changes unless you click.",
   "extensions": {
     "com.openai": {

@@ -39,8 +39,12 @@ PLUGIN_INSTRUCTIONS = (
     "Call storage_render_view only when the person asks to see a subfolder, the other size measure or file types. "
     "Report sizes in MB/GB and describe coverage using the coverageSummary field (do not infer limits from the limits settings). "
     "Categories and age never prove something is safe to delete; allocated estimates are not reclaimable bytes. "
-    "When the person wants to free space, call storage_suggest_cleanup after a scan and explain the top candidates and "
-    "their reasons; they review, tick and click Move to Trash, Delete permanently or Remove Download in the view. "
+    "Show at most ONE view per reply: only storage_start_scan and storage_render_view show one. "
+    "When the person wants to free space, pass freeUpSpace: true: to storage_start_scan if you are scanning in this reply, "
+    "otherwise to one storage_render_view call. Suggestions then appear in that view and in its result; explain the top "
+    "candidates and their reasons. storage_suggest_cleanup returns the same suggestions as data only (no view), for a subfolder "
+    "or after a scan that was still running. If the person asks to check git repositories or find exact duplicates, pass checks "
+    "to storage_suggest_cleanup. They tick items and click Move to Trash, Delete permanently or Remove Download in the view. "
     "You cannot delete, move or evict anything and must not use other tools to do it. If this host shows no inline view, "
     "call storage_open_local_view and tell the person to click Free up space there to review and act. "
     "Never claim something was deleted unless they tell you or a receipt says so.")
@@ -69,9 +73,10 @@ def coverage_summary(data, cloud_only=0):
     stopped = any(r in gaps for r in ("time_limit", "entry_limit", "metadata_delayed"))
     return (("Stopped early; totals are a lower bound. " if stopped else "Everything reachable was measured. Not counted: ")
             + "; ".join(parts) + "." + cloud)
+FREE_UP_SPACE = {"type": "boolean"}
 RENDER_DESCRIPTION = ("Show the person an interactive treemap and table of the scanned folder (inline in the chat where supported, "
                       "and in the local browser view). A finished scan already shows one; use this only when the person asks to see a subfolder, "
-                      "the other size measure or file types. "
+                      "the other size measure or file types, or with freeUpSpace when they want to free space after an earlier scan. "
                       "Use withinNodeId to open a subfolder; selectionIds highlights items you mention.")
 
 VIEW_ONLY = "View-only: called by the Storage Assistant view after the person clicks."
@@ -84,9 +89,13 @@ PLUGIN_TOOLS = [
     ("storage_open_local_view", "Open the full-size treemap in the person's web browser on this Mac. "
      "Use when they want a bigger view or the inline view is unavailable.", obj()),
     ("storage_suggest_cleanup", "Suggest items worth reviewing for freeing space in the scanned folder, with evidence-based reasons "
-     "(read-only; nothing is changed). Shows the person the treemap in cleanup mode, where only they can act. Call after a scan; "
-     "use withinNodeId to focus on a subfolder.",
-     obj({"scanId": ID, "scanVersion": VERSION, "withinNodeId": ID}, ["scanId", "scanVersion"])),
+     "(read-only; nothing is changed). Returns data only and shows no view; to show suggestions, pass freeUpSpace to "
+     "storage_start_scan or storage_render_view instead. Use withinNodeId to focus on a subfolder. Pass checks only when the "
+     "person asks: gitHealth checks whether git repositories are pushed with nothing unsaved; exactDuplicates compares file "
+     "contents on this Mac to confirm duplicates. Checks stay on until switched off.",
+     obj({"scanId": ID, "scanVersion": VERSION, "withinNodeId": ID,
+          "checks": obj({"gitHealth": {"type": "boolean"}, "exactDuplicates": {"type": "boolean"}})},
+         ["scanId", "scanVersion"])),
     ("storage_cleanup_preview", VIEW_ONLY + " Previews moving the selected items to the Trash, deleting them or evicting iCloud copies; "
      "returns what would happen and a one-time token. Changes nothing.",
      obj({"scanId": ID, "scanVersion": VERSION, "nodeIds": {"type": "array", "items": ID, "minItems": 1, "maxItems": 500},
@@ -97,12 +106,17 @@ PLUGIN_TOOLS = [
      obj({"optIn": obj({"gitHealth": {"type": "boolean"}, "exactDuplicates": {"type": "boolean"}}),
           "openTrash": {"type": "boolean"}}, ["optIn"])),
 ]
+VIEWS = ("storage_start_scan", "storage_render_view")
 APP_ONLY = {"storage_cleanup_preview", "storage_cleanup_execute", "storage_cleanup_settings"}
 SCHEMAS = {name: schema for name, _, schema in PLUGIN_TOOLS}
 
 
 NO_VIEW = ("Cleanup actions run only from the person's click in a view, and this host has no inline view. "
            "Call storage_open_local_view and ask the person to click Free up space there to review and act.")
+
+
+def _invalid(message):
+    raise StorageError("INVALID_INPUT", message)
 
 
 def _refuse_without_view():
@@ -134,8 +148,6 @@ class PluginProtocol(Protocol):
                          "annotations": {"readOnlyHint": not changes, "destructiveHint": changes, "openWorldHint": False}}
                 if changes:
                     entry["_meta"] = {"ui": {"visibility": ["app"]}}
-                elif name == "storage_suggest_cleanup":
-                    entry["_meta"] = {"ui": {"resourceUri": UI_URI}, "openai/outputTemplate": UI_URI}
                 extra.append(entry)
             tools = extra + response["result"]["tools"]
             for tool in tools:
@@ -144,12 +156,13 @@ class PluginProtocol(Protocol):
                 # without relying on the model to call render_view.
                 if tool["name"] == "storage_render_view":
                     tool["description"] = RENDER_DESCRIPTION
-                if tool["name"] in ("storage_render_view", "storage_start_scan"):
+                if tool["name"] in VIEWS:
+                    # Only these two show a view, so one reply never opens two.
                     tool["_meta"] = {"ui": {"resourceUri": UI_URI}, "openai/outputTemplate": UI_URI}
-                if tool["name"] == "storage_start_scan":
-                    # Scan size is the grant's; the model cannot shrink it to stale maxima.
                     schema = json.loads(json.dumps(tool["inputSchema"]))
+                    # Scan size is the grant's; the model cannot shrink it to stale maxima.
                     schema["properties"].pop("limits", None)
+                    schema["properties"]["freeUpSpace"] = FREE_UP_SPACE
                     tool["inputSchema"] = schema
             response["result"]["tools"] = tools
         if response and isinstance(request, dict) and request.get("method") == "initialize" and "result" in response:
@@ -175,9 +188,13 @@ class Plugin:
     def invoke(self, name, args):
         started = time.monotonic()
         result = self._invoke(name, args)
-        # Host diagnostics: tool name, outcome and duration only (no arguments, names or paths).
+        # Host diagnostics: tool name, outcome, duration and whether suggestions were asked for and shown
+        # (no other arguments, names or paths).
         outcome = "error " + result["structuredContent"]["error"]["code"] if result.get("isError") else "ok"
-        print(f"storage-assistant: {name} {outcome} {round((time.monotonic() - started) * 1000)}ms",
+        data = result["structuredContent"].get("data") or {}
+        flags = (" freeUpSpace" if isinstance(args, dict) and args.get("freeUpSpace") is True else "") + (
+            f" candidates={len(data['candidates'])}" if isinstance(data.get("candidates"), list) else "")
+        print(f"storage-assistant: {name} {outcome}{flags} {round((time.monotonic() - started) * 1000)}ms",
               file=sys.stderr, flush=True)
         return result
 
@@ -197,9 +214,13 @@ class Plugin:
                 validate(args, SCHEMAS[name])
                 return self.open_view()
             return envelope(run)
+        free = False
+        if name in VIEWS and isinstance(args, dict):
+            free = args.get("freeUpSpace", False)
+            if not isinstance(free, bool):
+                return envelope(lambda: _invalid("freeUpSpace must be true or false."))
+            args = {k: v for k, v in args.items() if k not in ("limits", "freeUpSpace")}
         if name in ("storage_start_scan", "storage_scan_status"):
-            if name == "storage_start_scan" and isinstance(args, dict):
-                args = {k: v for k, v in args.items() if k != "limits"}
             result = call(self.engine, name, args, self.companion.url)
             body = result["structuredContent"]
             if body["ok"] and body["data"]["state"] == "running":
@@ -208,7 +229,7 @@ class Plugin:
                     time.sleep(.25)
                 # Totals are recomputed once, not on every wait tick.
                 result = call(self.engine, "storage_scan_status", {"scanId": scan_id}, self.companion.url)
-            return self.with_view(result)
+            return self.with_suggestions(self.with_view(result), free)
         if name == "storage_render_view":
             # Highlight in the paired local view, then return the inline alias view.
             local = call(self.engine, name, args, self.companion.url)
@@ -220,18 +241,18 @@ class Plugin:
                     "Names, relative paths, categories, sizes and coverage reach this assistant host; file contents are never read.")
                 result["structuredContent"]["data"]["localViewAvailable"] = True
                 result["content"] = [{"type": "text", "text": json.dumps(result["structuredContent"], ensure_ascii=True)}]
-            return result
+            return self.with_suggestions(result, free)
         return call(self.engine, name, args, self.companion.url)
 
     def cleanup_tool(self, name, args):
         validate(args, SCHEMAS[name])
         if name == "storage_suggest_cleanup":
+            # The person asked for these checks in the conversation.
+            for key, enabled in args.get("checks", {}).items():
+                self.cleanup.set_opt_in(key, enabled)
             data = self.cleanup.suggest(args["scanId"], args["scanVersion"], args.get("withinNodeId"))
-            try:
-                data["view"] = view(self.engine, {"scanId": args["scanId"], "scanVersion": args["scanVersion"],
-                                                  "basis": "logical"})["view"]
-            except StorageError:
-                pass
+            with self.cleanup.lock:
+                data["checks"] = {n: n in self.cleanup.opt_in for n in OPT_INS}
             return data
         if name == "storage_cleanup_preview":
             return self.cleanup.preview(args["scanId"], args["scanVersion"], args["nodeIds"], args["action"])
@@ -243,6 +264,20 @@ class Plugin:
             self.cleanup.open_trash()
         with self.cleanup.lock:
             return {"optIn": {n: n in self.cleanup.opt_in for n in OPT_INS}}
+
+    def with_suggestions(self, result, free):
+        """With freeUpSpace, the one view this reply shows opens with cleanup suggestions."""
+        if not free or result["isError"]:
+            return result
+        data = result["structuredContent"]["data"]
+        data["freeUpSpace"] = True  # a still-running scan's view asks for them when it finishes
+        if "view" in data:
+            try:
+                data["candidates"] = self.cleanup.suggest(data["view"]["scanId"], data["view"]["scanVersion"])["candidates"]
+            except StorageError:
+                pass
+        result["content"] = [{"type": "text", "text": json.dumps(result["structuredContent"], ensure_ascii=True)}]
+        return result
 
     def with_view(self, result):
         """Attach the root treemap view to a finished scan result for MCP Apps hosts."""

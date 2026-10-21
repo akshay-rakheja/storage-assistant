@@ -32,9 +32,7 @@
   }
   function status(text) { $('status').textContent = text; }
   function controls() {
-    for (const id of ['basis','aggregate','refresh','first','next','share']) $(id).disabled = closing || busy || acting || !ready || !current || !caps.serverTools;
-    $('next').disabled ||= !current?.nextCursor;
-    $('share').disabled ||= !caps.updateModelContext?.structuredContent || current?.aggregate !== 'children';
+    for (const id of ['basis','aggregate','refresh','first','next']) $(id).disabled = closing || busy || acting || !ready || !current || !caps.serverTools;
   }
   function fail(code) {
     const messages = {
@@ -71,6 +69,7 @@
     if (envelope?.ok === false || result?.isError) { fail(envelope?.error?.code); return false; }
     if (envelope?.data?.state === 'running' && !envelope.data.view) {
       const n = Number.isSafeInteger(envelope.data.observedEntries) ? envelope.data.observedEntries : 0;
+      if (envelope.data.freeUpSpace === true) wantSuggest = true;
       if (!current) { status(`Scanning… ${n.toLocaleString()} entries so far. The map appears here when the scan finishes.`); follow(envelope.data.scanId); }
       return false;
     }
@@ -83,11 +82,16 @@
       return false;
     }
     if (shared || sharing) clearContext();
-    watermark=v.scanVersion; revision=v.viewRevision; current=v;
+    if (!current || current.scanId!==v.scanId || current.scanVersion!==v.scanVersion) { ticked = new Set(); known = new Map(); }
+    paged = more; if (!more) shownRows = FEW;
+    more = false; watermark=v.scanVersion; revision=v.viewRevision; current=v;
     if (suggested) candidates(data, v);
+    else if (data.freeUpSpace === true) wantSuggest = true;
     else if (cleanup && (cleanup.scanId!==v.scanId || cleanup.scanVersion!==v.scanVersion)) leaveCleanup();
     selected=v.rows.find(r=>r.nodeId && v.selectionIds.includes(r.nodeId)) || v.within;
-    render(); return true;
+    render();
+    if (wantSuggest && !rescanning) { wantSuggest = false; setTimeout(suggest); }
+    return true;
   }
   // Keep one progress view current: ask for status until the scan finishes, then render.
   let following = null;
@@ -111,7 +115,7 @@
   function choose(row) {
     if(busy||closing||acting)return;
     if(row.kind==='directory') load({withinNodeId:row.nodeId,aggregate:'children'},true);
-    else { selected=row; if(shared)clearContext(); render(); }
+    else if(pickable(row)) toggle(row.nodeId, !ticked.has(row.nodeId));
   }
   const CATS = {video:'Video',audio:'Audio',image:'Images',document:'Documents',archive:'Archives',source:'Code',other:'Other'};
   const ONE = {video:'Video',audio:'Audio',image:'Image',document:'Document',archive:'Archive',source:'Code',other:'Other'};
@@ -157,14 +161,19 @@
     if(v.unknownAllocationCount)$('coverage').textContent+=` ${v.unknownAllocationCount.toLocaleString()} ${v.unknownAllocationCount===1?'file has':'files have'} unknown disk usage.`;
     $('caption').textContent=v.aggregate==='children'?'Items in this folder, largest first':'File types in this folder, largest first';
     const cleanOn=!!cleanup&&cleanup.scanId===v.scanId&&cleanup.scanVersion===v.scanVersion;
+    for(const r of v.rows)if(pickable(r)&&!known.has(r.nodeId))known.set(r.nodeId,rowItem(r));
     const largest=v.rows.reduce((m,r)=>r.bytes===null?m:Math.max(m,Number(r.bytes)),0)||1;
-    $('rows').replaceChildren(...v.rows.map(r=>{
+    $('rows').replaceChildren(...v.rows.slice(0,shownRows).map(r=>{
       const tr=element('tr'),name=element('td'),type=element('td',typeLabel(r)),size=element('td');
       name.className='name';type.className='type';size.className='size num';
       const label=element('span',r.nodeId?r.displayLabel:(CATS[r.displayLabel]||r.displayLabel));
-      const c=cleanOn&&r.nodeId?cleanup.byId.get(r.nodeId):null;
-      if(r.nodeId){const b=button('',()=>choose(r),r.nodeId===selected?.nodeId||v.selectionIds.includes(r.nodeId));b.append(swatch(kindOf(r)),label);if(c)b.append(chip(c));b.title=r.path||r.displayLabel;
-        if(cleanOn){const pick=element('div');pick.className='pick';if(c){pick.append(checkbox(c,'in the clean-up','row'));tr.className='tier-'+c.tier;}else{const gap=element('i');gap.className='gap';pick.append(gap);}pick.append(b);name.append(pick);}else name.append(b);}
+      const c=cleanOn&&r.nodeId?cleanup.byId.get(r.nodeId):null,inside=cleanOn&&r.kind==='directory'&&!c?within(r):0;
+      if(r.nodeId){const b=button('',()=>choose(r),v.selectionIds.includes(r.nodeId));b.append(swatch(kindOf(r)),label);if(c)b.append(chip(c));
+        else if(inside){const e=element('em',`${inside} suggested inside`);e.className='chip tier-glance';b.append(e);}
+        b.title=r.path||r.displayLabel;
+        const pick=element('div');pick.className='pick';
+        if(caps.serverTools&&pickable(r)){pick.append(checkbox(item(r.nodeId),'','row'));if(c)tr.className='tier-'+c.tier;}else{const gap=element('i');gap.className='gap';pick.append(gap);}
+        pick.append(b);name.append(pick);}
       else name.append(swatch(kindOf(r)),label);
       const meter=element('div'),bar=element('span'),fill=element('i');meter.className='meter';
       fill.style.width=r.bytes===null?'0':`${Math.max(1,Number(r.bytes)/largest*100)}%`;bar.append(fill);
@@ -174,32 +183,28 @@
     const positive=v.rows.filter(r=>r.bytes!==null&&BigInt(r.bytes)>0n);
     const box=$('map'),W=box.clientWidth||800,H=box.clientHeight||340;
     const tiles=squarify(positive,0,0,W,H);
-    const ticks=[];
     box.replaceChildren(...tiles.map(t=>{
-      const kind=kindOf(t.row),pressed=t.row.nodeId?t.row.nodeId===selected?.nodeId||v.selectionIds.includes(t.row.nodeId):undefined;
+      const kind=kindOf(t.row),pressed=t.row.nodeId?v.selectionIds.includes(t.row.nodeId):undefined;
+      const cell=element('div');cell.className='cell';
+      cell.style.cssText=`left:${t.x/W*100}%;top:${t.y/H*100}%;width:${t.w/W*100}%;height:${t.h/H*100}%`;
       const b=button('',()=>t.row.nodeId&&choose(t.row),pressed);
-      b.className=`tile cat-${kind}${t.w*t.h>W*H/6?' big':''}${t.w<60||t.h<40?' tiny':''}`;
-      b.style.cssText=`left:${t.x/W*100}%;top:${t.y/H*100}%;width:${t.w/W*100}%;height:${t.h/H*100}%`;
+      b.className=`tile cat-${kind}${t.w*t.h>W*H/6?' big':''}${t.w<60||t.h<40?' tiny':''}${ticked.has(t.row.nodeId)?' on':''}`;
       const title=t.row.nodeId?t.row.displayLabel:(CATS[t.row.displayLabel]||t.row.displayLabel);
       b.append(element('strong',title),element('span',bytes(t.row.bytes)));
       b.setAttribute('aria-label',`${title}, ${typeLabel(t.row)}, ${bytes(t.row.bytes)}${t.row.kind==='directory'?', open folder':''}`);
       b.title=`${t.row.path||title} (${bytes(t.row.bytes)})`;
       const c=cleanOn&&t.row.nodeId?cleanup.byId.get(t.row.nodeId):null;
-      if(c){b.classList.add('cand','tier-'+c.tier);b.append(chip(c));b.setAttribute('aria-label',b.getAttribute('aria-label')+`, suggested: ${TIERS[c.tier]}`);if(t.w>=34&&t.h>=30)ticks.push(tickToggle(c,t,W,H));}
-      if(!t.row.nodeId)b.disabled=true;return b;
-    }),...ticks);
+      if(c){b.classList.add('cand','tier-'+c.tier);b.append(chip(c));b.setAttribute('aria-label',b.getAttribute('aria-label')+`, suggested: ${TIERS[c.tier]}`);}
+      if(!t.row.nodeId)b.disabled=true;cell.append(b);
+      if(caps.serverTools&&pickable(t.row)&&t.w>=34&&t.h>=30)cell.append(tickToggle(item(t.row.nodeId),!!c));
+      return cell;
+    }));
     const kinds=[...new Set(positive.map(kindOf))];
     $('legend').replaceChildren(...kinds.map(k=>{const li=element('li');li.append(swatch(k),document.createTextNode(k==='folder'?'Folder':(CATS[k]||k)));return li;}));
-    $('first').hidden=!v.rows.length||!current.nextCursor&&v.matchingRows<=v.rows.length;
-    $('next').hidden=!v.nextCursor;
-    $('share').hidden=!caps.updateModelContext?.structuredContent;
-    $('selection').textContent=selected&&selected!==v.within?`Selected: ${selected.displayLabel}${shared?', shared with the chat.':'.'}`:'';
-    $('caveats').replaceChildren(...[
-      'File size is how big files say they are; space on disk is an estimate and can be much smaller for sparse or cloud files.',
-      'Files linked in several places are counted once.',
-      'Neither number tells you exactly how much space deleting something would free (APFS clones and snapshots share space).',
-      'Items that change during the scan, iCloud-only files, links and protected folders are listed above when skipped.'
-    ].map(t=>element('li',t)));
+    const hiddenRows=v.rows.length>shownRows;
+    $('next').hidden=!hiddenRows&&!v.nextCursor;
+    $('next').textContent=hiddenRows?`Show ${Math.min(MORE,v.rows.length-shownRows)} more`:'Show more';
+    $('first').hidden=!paged&&shownRows<=FEW;
     renderCleanup();controls();resize();
   }
   // ---- Cleanup mode -------------------------------------------------------
@@ -209,6 +214,14 @@
   const TIERS = {safe:'Safe to clear',glance:'Worth a glance',call:'Your call'};
   const ACTIONS = ['trash','evict','delete'];
   let cleanup = null, reviewing = [], ticked = new Set(), seen = new Set(), previews = null, acting = false, resuggest = false, rescanning = null, deleting = null;
+  // Anything the person ticks themselves can go to the Trash; suggestions may also offer Delete permanently or Remove Download.
+  let known = new Map(), wantSuggest = false, shownRows = 8, more = false, paged = false;
+  const FEW = 8, MORE = 20;
+  const pickable = r => !!r?.nodeId && (r.kind==='file' || r.kind==='directory') && !r.groupedFiles && label(r) && short(r.path,4096);
+  const rowItem = r => ({nodeId:r.nodeId,displayLabel:r.displayLabel,path:r.path,tier:null,preTicked:false,reasons:[],actions:['trash'],
+    freesBytes:r.allocatedEstimateBytes ?? r.logicalBytes ?? '0'});
+  const item = id => cleanup?.byId.get(id) || known.get(id);
+  const within = r => cleanup.list.filter(c => c.path.startsWith(r.path+'/')).length;
   const short = (s,n) => typeof s === 'string' && s.length > 0 && s.length <= n;
   function candidate(c) {
     if (!c || !ID.test(c.nodeId) || !label(c) || !short(c.path,4096) || !TIERS[c.tier] || !validBytes(c.freesBytes) || c.freesBytes===null) return null;
@@ -225,16 +238,15 @@
     for (const c of list) { if (!seen.has(c.nodeId) && c.preTicked) ticked.add(c.nodeId); seen.add(c.nodeId); }
     for (const id of [...ticked]) if (!cleanup.byId.has(id)) ticked.delete(id);
     previews = null; deleting = null; $('review').hidden = true; $('confirm-delete').hidden = true;
-    if (fresh) settings({});
   }
   function leaveCleanup() {
-    cleanup = null; ticked = new Set(); seen = new Set(); previews = null; deleting = null;
-    for (const id of ['cleanup','review','confirm-delete','tray']) $(id).hidden = true;
+    cleanup = null; ticked = new Set(); seen = new Set(); previews = null; deleting = null; $('cleanup-status').textContent = '';
+    for (const id of ['review','confirm-delete','tray']) $(id).hidden = true;
   }
   const sum = list => list.reduce((n,x)=>n+BigInt(x.freesBytes||'0'),0n).toString();
   const items = n => `${n.toLocaleString()} ${n===1?'item':'items'}`;
   function toggle(id, on) {
-    if (!cleanup?.byId.has(id) || acting) return;
+    if (!item(id) || acting) return;
     on ? ticked.add(id) : ticked.delete(id);
     // Re-rendering replaces the controls: keep keyboard focus on the same kind of control for the same item.
     const a = document.activeElement, key = a?.dataset?.pick ? {pick:a.dataset.pick, node:a.dataset.node} : null;
@@ -249,32 +261,28 @@
   function checkbox(c, where, pick) {
     const x = element('input'); x.type = 'checkbox'; x.checked = ticked.has(c.nodeId); x.disabled = acting;
     x.dataset.pick = pick; x.dataset.node = c.nodeId;
-    x.setAttribute('aria-label', `Include ${c.displayLabel} (${TIERS[c.tier]}) ${where}`);
+    x.setAttribute('aria-label', `Select ${c.displayLabel}${c.tier ? ` (${TIERS[c.tier]})` : ''}${where ? ' '+where : ''}`);
     x.onchange = () => toggle(c.nodeId, x.checked); return x;
   }
   function chip(c) { const e = element('em', c.reasons[0] || TIERS[c.tier]); e.className = 'chip tier-'+c.tier; e.title = `${TIERS[c.tier]}: ${c.reasons.join('; ')}`; return e; }
   function who(name, sub) { const d = element('span'); d.className = 'who'; d.append(element('b', name)); if (sub) d.append(element('small', sub)); return d; }
-  function tickToggle(c, t, W, H) {
+  function tickToggle(c, suggested) {
     // A separate control on top of the tile: clicking the tile itself still opens folders.
-    const b = button(ticked.has(c.nodeId) ? '✓' : '', () => toggle(c.nodeId, !ticked.has(c.nodeId)));
-    b.className = 'tick'; b.dataset.pick = 'tile'; b.dataset.node = c.nodeId; b.setAttribute('role','checkbox'); b.setAttribute('aria-checked', String(ticked.has(c.nodeId)));
-    b.setAttribute('aria-label', `Include ${c.displayLabel} (${TIERS[c.tier]})`); b.title = `${TIERS[c.tier]}: ${c.reasons.join('; ')}`; b.disabled = acting;
-    b.style.cssText = `left:calc(${(t.x+t.w)/W*100}% - 27px);top:calc(${t.y/H*100}% + 5px)`; return b;
+    const on = ticked.has(c.nodeId), b = button(on ? '✓' : '', () => toggle(c.nodeId, !ticked.has(c.nodeId)));
+    b.className = 'tick' + (on || suggested ? ' shown' : ''); b.dataset.pick = 'tile'; b.dataset.node = c.nodeId; b.setAttribute('role','checkbox'); b.setAttribute('aria-checked', String(on));
+    b.setAttribute('aria-label', `Select ${c.displayLabel}${c.tier ? ` (${TIERS[c.tier]})` : ''}`); b.title = c.tier ? `${TIERS[c.tier]}: ${c.reasons.join('; ')}` : 'Select'; b.disabled = acting;
+    return b;
   }
   function renderCleanup() {
     const on = !!cleanup && cleanup.scanId===current?.scanId && cleanup.scanVersion===current?.scanVersion;
-    $('cleanup').hidden = !on;
-    if (!on) { $('tray').hidden = true; return; }
-    $('candidates').replaceChildren(...(cleanup.list.length ? cleanup.list.map(c => {
-      const li = element('li'); li.className = 'tier-'+c.tier;
-      li.append(checkbox(c,'in the clean-up','list'), who(c.displayLabel, `${TIERS[c.tier]} · ${c.path}`), chip(c), element('span', bytes(c.freesBytes)));
-      li.lastChild.className = 'amt'; return li;
-    }) : [element('li','Nothing to suggest in this folder.')]));
-    const chosen = cleanup.list.filter(c=>ticked.has(c.nodeId));
-    $('tray').hidden = !$('review').hidden || !$('confirm-delete').hidden || !$('receipt').hidden;
-    $('tray-text').textContent = `${items(chosen.length)} · frees about ${bytes(sum(chosen))} on this Mac`;
+    // Shown until this snapshot has suggestions, so they never depend on the assistant asking for them.
+    $('suggest').hidden = on || !current || !caps.serverTools; $('suggest').disabled = acting || busy || closing;
+    if (on && !cleanup.list.length && !$('cleanup-status').textContent) $('cleanup-status').textContent = 'Nothing stands out to suggest here. Tick anything you want to clear.';
+    const chosen = [...ticked].map(item).filter(Boolean);
+    // The bar shows only once something is ticked, and steps aside while a review or receipt is open.
+    $('tray').hidden = !chosen.length || !$('review').hidden || !$('confirm-delete').hidden || !$('receipt').hidden;
+    $('tray-text').textContent = `${items(chosen.length)} selected · about ${bytes(sum(chosen))}`;
     $('tray-review').disabled = acting || !chosen.length || !caps.serverTools;
-    for (const id of ['optin-git','optin-dup']) $(id).disabled = acting || !caps.serverTools;
   }
   async function call(name, args, wait=30000) {
     const result = await request('tools/call', {name, arguments:args}, wait);
@@ -288,10 +296,10 @@
   }
   function busyCleanup(on) { acting = on; for (const id of ['do-trash','do-evict','do-delete','review-back','confirm-yes','confirm-no','open-trash','receipt-close']) $(id).disabled = on; controls(); }
   async function review(key=null, keep=false) {
-    if (!cleanup || acting || closing) return;
+    if (!current || acting || closing) return;
     // An open review keeps listing items unticked in it, so they can be ticked again (and keep focus).
-    if (!keep) reviewing = cleanup.list.filter(c=>ticked.has(c.nodeId)).map(c=>c.nodeId);
-    const shown = reviewing.map(id=>cleanup.byId.get(id)).filter(Boolean);
+    if (!keep) reviewing = [...ticked].filter(item);
+    const shown = reviewing.map(item).filter(Boolean);
     const v = current, chosen = shown.filter(c=>ticked.has(c.nodeId));
     $('receipt').hidden = true; $('confirm-delete').hidden = true; $('review').hidden = false; $('check-refresh').hidden = true; previews = null;
     $('review-status').textContent = chosen.length ? 'Checking each item again…' : 'Nothing is ticked.';
@@ -317,7 +325,7 @@
     const detail = new Map();
     for (const a of ACTIONS) for (const i of (Array.isArray(results[a]?.items) ? results[a].items : [])) if (ID.test(i?.nodeId) && !detail.has(i.nodeId)) detail.set(i.nodeId, i);
     $('review-items').replaceChildren(...chosen.map(c => {
-      const i = detail.get(c.nodeId), li = element('li'); li.className = 'tier-'+c.tier+(ticked.has(c.nodeId)?'':' off');
+      const i = detail.get(c.nodeId), li = element('li'); li.className = (c.tier ? 'tier-'+c.tier : '')+(ticked.has(c.nodeId)?'':' off');
       const why = (Array.isArray(i?.reasons) ? i.reasons.map(r=>r?.text ?? r) : c.reasons).filter(t=>short(t,300)).join('; ');
       li.append(checkbox(c,'in this review','review'), who(c.displayLabel, `${c.path}${why ? ' · '+why : ''}`), element('span', bytes(validBytes(i?.freesBytes) && i.freesBytes ? i.freesBytes : c.freesBytes)));
       li.lastChild.className = 'amt';
@@ -355,7 +363,7 @@
     } catch (e) {
       // Back to a review with no plan: the person ticks and reviews again for a fresh token.
       $('confirm-delete').hidden = true; $('review').hidden = false;
-      renderReview(cleanup ? reviewing.map(id=>cleanup.byId.get(id)).filter(Boolean) : [], {});
+      renderReview(reviewing.map(item).filter(Boolean), {});
       if (e.refused) $('review-status').textContent = `${e.message} Nothing more was sent. Go back and review again; Refresh shows the current state.`;
       else {
         // Timeout, bridge failure or an unexpected error: the plugin may have acted before it stopped.
@@ -391,32 +399,17 @@
     } else $('receipt-status').textContent = done.length ? 'Refresh to update the map.' : '';
     $('receipt-title').focus();
   }
-  async function settings(change, openTrash=false) {
+  async function openTrash() {
     if (!caps.serverTools || acting) return;
-    const changing = Object.keys(change).length > 0, out = openTrash ? 'receipt-status' : 'cleanup-status';
-    const args = {optIn:change}; if (openTrash) args.openTrash = true;
-    let ok = false;
-    if (changing) busyCleanup(true);
-    try {
-      const data = await call('storage_cleanup_settings', args);
-      if (typeof data?.optIn?.gitHealth === 'boolean') $('optin-git').checked = data.optIn.gitHealth;
-      if (typeof data?.optIn?.exactDuplicates === 'boolean') $('optin-dup').checked = data.optIn.exactDuplicates;
-      if (openTrash) $(out).textContent = 'The Trash is open in Finder.';
-      ok = true;
-    } catch (e) {
-      $(out).textContent = e.message;
-      if ('gitHealth' in change) $('optin-git').checked = !change.gitHealth;
-      if ('exactDuplicates' in change) $('optin-dup').checked = !change.exactDuplicates;
-    } finally { if (changing) busyCleanup(false); }
-    if (changing && ok) await suggest();  // switching a check forgets earlier suggestions
-    renderCleanup();
+    try { await call('storage_cleanup_settings', {optIn:{}, openTrash:true}); $('receipt-status').textContent = 'The Trash is open in Finder.'; }
+    catch (e) { $('receipt-status').textContent = e.message; }
   }
   function afterRescan(ok) {
     $('receipt-status').textContent = ok ? 'The map now shows the folder after this change.' : 'Refresh to update the map.';
     if (ok && resuggest) { resuggest = false; suggest(); }
   }
   async function suggest() {
-    // Suggestions are refreshed after an opt-in change or a rescan; the model sees nothing new.
+    // Suggestions load when a scan asked to free space finishes, and again after a rescan; the model sees nothing new.
     const v = current; if (!v || !caps.serverTools || acting) return;
     $('cleanup-status').textContent = 'Looking for suggestions…'; busyCleanup(true);
     try {
@@ -429,6 +422,7 @@
   }
   function resize() { notify('ui/notifications/size-changed',{height:Math.min(document.documentElement.scrollHeight,2400)}); }
   $('tray-review').onclick = review;
+  $('suggest').onclick = suggest;
   $('review-back').onclick = () => { if (acting) return; previews = null; $('review').hidden = true; renderCleanup(); resize(); };
   $('do-trash').onclick = () => execute('trash');
   $('do-evict').onclick = () => execute('evict');
@@ -438,14 +432,12 @@
   $('confirm-no').onclick = cancelDelete;
   $('confirm-delete').addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); cancelDelete(); } });
   $('check-refresh').onclick = () => { if (acting) return; $('review').hidden = true; renderCleanup(); load(); };
-  $('open-trash').onclick = () => settings({}, true);
+  $('open-trash').onclick = openTrash;
   $('receipt-close').onclick = () => {
     if (acting) return; $('receipt').hidden = true;
     if ($('view').classList.contains('receipt-only')) { $('view').classList.remove('receipt-only'); $('view').hidden = true; }
     renderCleanup(); resize();
   };
-  $('optin-git').onchange = () => settings({gitHealth:$('optin-git').checked});
-  $('optin-dup').onchange = () => settings({exactDuplicates:$('optin-dup').checked});
   function theme(context) {
     // Host context: light/dark theme plus optional standard CSS variables.
     if(!context||typeof context!=='object')return;
@@ -476,24 +468,6 @@
       if(accept(result)&&navigation&&shared)clearContext();
     } catch { if(token===operation)fail('UNAVAILABLE'); }
     finally{if(token===operation){busy=false;controls();}}
-  }
-  async function share() {
-    if(!current||!selected||busy||closing||!caps.updateModelContext?.structuredContent)return;
-    const v=current,selection=selected,token=++operation;busy=true;sharing=true;controls();
-    try{
-      // Revalidate against the executor at sharing time. A cached widget cannot
-      // authorize expired/released/replaced snapshot context.
-      const result=await request('tools/call',{name:'storage_get_node',arguments:{scanId:v.scanId,scanVersion:v.scanVersion,nodeId:selection.nodeId}});
-      if(token!==operation||disposed)return;
-      const envelope=result?.structuredContent,s=envelope?.data?.node,e=envelope?.data?.evidence;
-      if(envelope?.ok!==true||result?.isError){fail(envelope?.error?.code);return;}
-      if(!node(s)||s.nodeId!==selection.nodeId||e?.scanId!==v.scanId||e?.scanVersion!==v.scanVersion){fail('BAD_RESULT');return;}
-      // Construct a minimal owned projection, never forward _meta/input/state.
-      const storageSelection={scanId:v.scanId,scanVersion:v.scanVersion,viewRevision:v.viewRevision,basis:v.basis,coverage:e.coverage,nodeId:s.nodeId,displayLabel:s.displayLabel,kind:s.kind,category:s.category,logicalBytes:s.logicalBytes,allocatedEstimateBytes:s.allocatedEstimateBytes};
-      await updateContext({structuredContent:{storageSelection}});if(token===operation){shared=true;render();}
-    }
-    catch{if(token===operation)status('Host did not accept selection context. Retry before asking a selected-item follow-up.');}
-    finally{if(token===operation){sharing=false;busy=false;controls();}}
   }
   function dispose(message=CLOSED) {
     if(disposed)return;disposed=true;ready=false;operation++;
@@ -535,7 +509,11 @@
   }
   $('basis').onchange=()=>load({basis:$('basis').value},true);
   $('aggregate').onchange=()=>load({aggregate:$('aggregate').value},true);
-  $('refresh').onclick=()=>load();$('first').onclick=()=>load();$('next').onclick=()=>load({cursor:current.nextCursor});$('share').onclick=share;
+  $('refresh').onclick=()=>load();
+  // Show a few rows first; reveal the loaded rows in steps, then fetch the next page.
+  $('first').onclick=()=>{if(!current)return;if(paged)load();else{shownRows=FEW;render();}};
+  $('next').onclick=()=>{if(!current)return;if(current.rows.length>shownRows){shownRows+=MORE;render();}
+    else if(current.nextCursor){more=true;shownRows=Infinity;load({cursor:current.nextCursor});}};
   window.addEventListener('message',receive);window.addEventListener('pagehide',unload);controls();
   request('ui/initialize',{protocolVersion:'2026-01-26',appInfo:{name:'storage-assistant',version:'0.2.0'},appCapabilities:{availableDisplayModes:['inline']}})
     .then(result=>{if(disposed)return;if(typeof result?.protocolVersion!=='string')throw new Error('Unsupported UI protocol');caps=result.hostCapabilities||{};theme(result.hostContext);ready=true;notify('ui/notifications/initialized',{});status('Waiting for a scan…');controls();})

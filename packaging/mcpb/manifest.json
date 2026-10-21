@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "storage-assistant",
   "display_name": "Storage Assistant",
-  "version": "0.6.0",
+  "version": "0.6.3",
   "description": "See what takes space in a folder on your Mac as a treemap, ask about it, and clear it with one click. Nothing changes unless you click.",
   "long_description": "Ask what's taking up space in a folder you name. Storage Assistant measures it on your Mac (names, sizes and dates only; file contents are never opened) and shows an interactive treemap in the chat. To free space, tick suggestions and click Move to Trash, Delete permanently or Remove Download in the view: nothing changes unless you click.",
   "author": {
