@@ -6,6 +6,7 @@ follows links, or reads iCloud-only (dataless) files.
 import hashlib
 import os
 import re
+import stat
 import subprocess
 from urllib.parse import urlsplit
 
@@ -13,7 +14,17 @@ MIN_DUPLICATE = 1_000_000
 HASH_BUDGET = 2_000_000_000
 CHUNK = 1_000_000
 GIT_TIMEOUT = 10
-GIT_ENV = {"GIT_OPTIONAL_LOCKS": "0", "PATH": "/usr/bin:/bin"}
+# No HOME, no system or global config and no system attributes: only the repo's own config is read,
+# and that is checked against GIT_CONFIG_ALLOWED before git status runs.
+GIT_ENV = {"GIT_OPTIONAL_LOCKS": "0", "PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ATTR_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
+GIT_SAFE = ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "core.hooksPath=/dev/null"]
+# Without the developer tools, /usr/bin/git is a shim that opens an install dialog.
+XCODE_SELECT = ["/usr/bin/xcode-select", "-p"]
+GIT_CONFIG_ALLOWED = {"core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates",
+                      "core.ignorecase", "core.precomposeunicode"}
+GIT_CONFIG_SUBSECTION = {"remote": {"url", "fetch"}, "branch": {"remote", "merge"}}
+ATTRIBUTES_MAX = 65536
 SCP_REMOTE = re.compile(r"^(?:[^@/:]+@)?([^:/@]+):(?!//)")
 
 
@@ -31,12 +42,84 @@ def remote_host(url):
     return match.group(1) if match and "/" not in url.split(":", 1)[0] else None
 
 
+def _developer_tools():
+    try:
+        return subprocess.run(XCODE_SELECT, capture_output=True, timeout=GIT_TIMEOUT, check=False,
+                              env={"PATH": "/usr/bin:/bin"}).returncode == 0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+
+
 def _git(path, *args):
-    result = subprocess.run(["git", "-C", path] + list(args), capture_output=True, timeout=GIT_TIMEOUT,
-                            check=False, env=GIT_ENV)
+    env = dict(GIT_ENV, GIT_CEILING_DIRECTORIES=os.path.dirname(path.rstrip("/")) or "/")
+    result = subprocess.run(["git", "-C", path] + GIT_SAFE + list(args), capture_output=True, timeout=GIT_TIMEOUT,
+                            check=False, env=env)
     if result.returncode != 0:
         raise OSError("git failed")
     return result.stdout.decode("utf-8", "replace")
+
+
+def _config_allowed(key):
+    if key in GIT_CONFIG_ALLOWED:
+        return True
+    section, _, rest = key.partition(".")
+    subsection, _, variable = rest.rpartition(".")
+    return bool(subsection) and variable in GIT_CONFIG_SUBSECTION.get(section, ())
+
+
+def _repo_config(path):
+    """The repo's own config (read without running anything), or None if any key is outside the allowlist."""
+    listed = _git(path, "config", "--local", "--no-includes", "--list", "-z")
+    config = {}
+    for entry in listed.split("\0"):
+        if not entry:
+            continue
+        key, _, value = entry.partition("\n")
+        if not _config_allowed(key):
+            return None
+        config.setdefault(key, value)
+    return config
+
+
+def _mentions_filter(dir_fd, name):
+    """True when a small attributes file names a filter driver, or cannot be read safely; False when absent."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > ATTRIBUTES_MAX:
+            return True
+        return b"filter=" in os.read(fd, ATTRIBUTES_MAX + 1)
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def _attributes_name_filters(repo_abs_path):
+    try:
+        repo_fd = os.open(repo_abs_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+    except OSError:
+        return True
+    try:
+        if _mentions_filter(repo_fd, ".gitattributes"):
+            return True
+        try:
+            info_fd = os.open(".git/info", os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=repo_fd)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return os.path.isdir(os.path.join(repo_abs_path, ".git", "info"))
+        try:
+            return _mentions_filter(info_fd, "attributes")
+        finally:
+            os.close(info_fd)
+    finally:
+        os.close(repo_fd)
 
 
 def _unquote(path):
@@ -46,11 +129,21 @@ def _unquote(path):
 
 
 def git_health(repo_abs_path):
-    """{"clean", "pushed", "remoteHost"}; any doubt means not clean, not pushed."""
+    """{"clean", "pushed", "remoteHost"}; any doubt means not clean, not pushed.
+
+    git status honours repo config that can run commands (core.fsmonitor, filter drivers named in
+    .gitattributes), so status only runs when the repo's config holds nothing but allowlisted keys and
+    no attributes file names a filter.
+    """
     from .signals import REBUILDABLE  # imported late: signals imports this module lazily
     bad = {"clean": False, "pushed": False, "remoteHost": None}
+    if not _developer_tools():
+        return bad
     try:
-        status = _git(repo_abs_path, "status", "--porcelain=v2", "--branch", "--ignored")
+        config = _repo_config(repo_abs_path)
+        if config is None or _attributes_name_filters(repo_abs_path):
+            return bad
+        status = _git(repo_abs_path, "status", "--porcelain=v2", "--branch", "--ignored", "--ignore-submodules=all")
     except (OSError, subprocess.SubprocessError, ValueError):
         return bad
     clean, upstream, ahead_behind = True, False, None
@@ -67,11 +160,7 @@ def git_health(repo_abs_path):
                 clean = False  # ignored local data (databases, config) would be lost
         else:
             clean = False
-    host = None
-    try:
-        host = remote_host(_git(repo_abs_path, "config", "--get", "remote.origin.url").strip())
-    except (OSError, subprocess.SubprocessError, ValueError):
-        pass
+    host = remote_host(config.get("remote.origin.url", ""))
     return {"clean": clean, "pushed": upstream and ahead_behind == "+0 -0", "remoteHost": host}
 
 

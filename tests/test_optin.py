@@ -86,6 +86,87 @@ class GitHealthTests(unittest.TestCase):
         health = optin.git_health(str(self.base))
         self.assertEqual(health, {"clean": False, "pushed": False, "remoteHost": None})
 
+    def marker_script(self, name):
+        """An executable that would create a marker file if git ever ran it."""
+        marker = self.base / (name + ".marker")
+        script = self.base / (name + ".sh")
+        script.write_text(f"#!/bin/sh\ntouch '{marker}'\ncat\n")
+        script.chmod(0o755)
+        return script, marker
+
+    def test_fsmonitor_from_repo_config_never_runs(self):
+        (self.repo / "a.txt").write_text("hi")
+        self.commit_and_push()
+        script, marker = self.marker_script("fsmonitor")
+        git(self.repo, "config", "core.fsmonitor", str(script))
+        health = optin.git_health(str(self.repo))
+        self.assertFalse(marker.exists(), "git ran the repo's core.fsmonitor command")
+        self.assertFalse(health["clean"])
+
+    def test_clean_filter_from_repo_config_never_runs(self):
+        (self.repo / "a.txt").write_text("hi")
+        (self.repo / ".gitattributes").write_text("*.txt filter=evil\n")
+        self.commit_and_push()
+        script, marker = self.marker_script("filter")
+        git(self.repo, "config", "filter.evil.clean", str(script))
+        later = time.time() + 5
+        os.utime(self.repo / "a.txt", (later, later))  # stat-dirty: status would re-hash through the clean filter
+        health = optin.git_health(str(self.repo))
+        self.assertFalse(marker.exists(), "git ran the repo's clean filter")
+        self.assertFalse(health["clean"])
+
+    def test_filter_in_info_attributes_with_config_never_runs(self):
+        (self.repo / "a.txt").write_text("hi")
+        self.commit_and_push()
+        script, marker = self.marker_script("info")
+        (self.repo / ".git" / "info").mkdir(exist_ok=True)
+        (self.repo / ".git" / "info" / "attributes").write_text("*.txt filter=evil\n")
+        git(self.repo, "config", "filter.evil.clean", str(script))
+        later = time.time() + 5
+        os.utime(self.repo / "a.txt", (later, later))
+        self.assertFalse(optin.git_health(str(self.repo))["clean"])
+        self.assertFalse(marker.exists())
+
+    def test_gitattributes_filter_alone_is_not_clean(self):
+        (self.repo / "a.txt").write_text("hi")
+        (self.repo / ".gitattributes").write_text("*.bin filter=lfs diff=lfs merge=lfs -text\n")
+        self.commit_and_push()
+        self.assertFalse(optin.git_health(str(self.repo))["clean"])
+
+    def test_config_outside_allowlist_is_not_clean(self):
+        (self.repo / "a.txt").write_text("hi")
+        self.commit_and_push()
+        self.assertTrue(optin.git_health(str(self.repo))["clean"])  # default keys plus remote/branch are allowed
+        for key, value in (("include.path", "/dev/null"), ("core.hooksPath", "/tmp"), ("diff.x.textconv", "cat"),
+                           ("core.pager", "less"), ("user.name", "t")):
+            with self.subTest(key=key):
+                git(self.repo, "config", key, value)
+                self.assertFalse(optin.git_health(str(self.repo))["clean"])
+                git(self.repo, "config", "--unset", key)
+
+    def test_missing_developer_tools_never_runs_git(self):
+        (self.repo / "a.txt").write_text("hi")
+        self.commit_and_push()
+        original_check, original_git = optin.XCODE_SELECT, optin._git
+        calls = []
+        optin.XCODE_SELECT = ["/usr/bin/false"]
+        optin._git = lambda *a: calls.append(a) or ""
+        try:
+            health = optin.git_health(str(self.repo))
+        finally:
+            optin.XCODE_SELECT, optin._git = original_check, original_git
+        self.assertEqual(health, {"clean": False, "pushed": False, "remoteHost": None})
+        self.assertEqual(calls, [])
+
+    def test_remote_host_comes_from_config(self):
+        (self.repo / "a.txt").write_text("hi")
+        self.commit_and_push()
+        git(self.repo, "remote", "set-url", "--push", "origin", str(self.remote))  # remote.origin.pushurl: not allowed
+        self.assertFalse(optin.git_health(str(self.repo))["clean"])
+        git(self.repo, "config", "--unset", "remote.origin.pushurl")
+        git(self.repo, "config", "remote.origin.url", "https://user:tok@github.com/a/b.git")
+        self.assertEqual(optin.git_health(str(self.repo))["remoteHost"], "github.com")
+
 
 class RemoteHostTests(unittest.TestCase):
     def test_remote_host_strips_credentials(self):
