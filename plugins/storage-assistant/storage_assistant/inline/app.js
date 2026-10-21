@@ -275,6 +275,8 @@
   }
   function renderCleanup() {
     const on = !!cleanup && cleanup.scanId===current?.scanId && cleanup.scanVersion===current?.scanVersion;
+    // Shown until this snapshot has suggestions, so they never depend on the assistant asking for them.
+    $('suggest').hidden = on || !current || !caps.serverTools; $('suggest').disabled = acting || busy || closing;
     if (on && !cleanup.list.length && !$('cleanup-status').textContent) $('cleanup-status').textContent = 'Nothing stands out to suggest here. Tick anything you want to clear.';
     const chosen = [...ticked].map(item).filter(Boolean);
     // The bar shows only once something is ticked, and steps aside while a review or receipt is open.
@@ -420,6 +422,7 @@
   }
   function resize() { notify('ui/notifications/size-changed',{height:Math.min(document.documentElement.scrollHeight,2400)}); }
   $('tray-review').onclick = review;
+  $('suggest').onclick = suggest;
   $('review-back').onclick = () => { if (acting) return; previews = null; $('review').hidden = true; renderCleanup(); resize(); };
   $('do-trash').onclick = () => execute('trash');
   $('do-evict').onclick = () => execute('evict');

@@ -53,6 +53,7 @@ button:disabled,select:disabled{opacity:.5;cursor:default}
 
 .bar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
 .bar label{display:flex}
+.bar button[hidden]{display:none}
 
 /* Treemap: packed tiles with hairline gutters. */
 #map{position:relative;height:240px;border-radius:var(--radius);overflow:hidden;background:var(--gutter)}
