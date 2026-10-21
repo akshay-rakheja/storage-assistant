@@ -188,9 +188,13 @@ class Plugin:
     def invoke(self, name, args):
         started = time.monotonic()
         result = self._invoke(name, args)
-        # Host diagnostics: tool name, outcome and duration only (no arguments, names or paths).
+        # Host diagnostics: tool name, outcome, duration and whether suggestions were asked for and shown
+        # (no other arguments, names or paths).
         outcome = "error " + result["structuredContent"]["error"]["code"] if result.get("isError") else "ok"
-        print(f"storage-assistant: {name} {outcome} {round((time.monotonic() - started) * 1000)}ms",
+        data = result["structuredContent"].get("data") or {}
+        flags = (" freeUpSpace" if isinstance(args, dict) and args.get("freeUpSpace") is True else "") + (
+            f" candidates={len(data['candidates'])}" if isinstance(data.get("candidates"), list) else "")
+        print(f"storage-assistant: {name} {outcome}{flags} {round((time.monotonic() - started) * 1000)}ms",
               file=sys.stderr, flush=True)
         return result
 
