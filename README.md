@@ -1,6 +1,8 @@
 # Storage Assistant
 
-See what's taking up space on your Mac by asking Claude (or ChatGPT) in plain language, and explore the answer as an interactive treemap.
+See what's taking up space on your Mac by asking Claude (or ChatGPT) in plain language, explore the answer as an interactive treemap, and clear what you don't need.
+
+![Asking to free up space in Downloads: a treemap with safe picks ticked, a look inside a folder, then a review and one click to move them to the Trash](docs/media/demo.gif)
 
 > "What's taking up the most space in my Downloads?"
 
