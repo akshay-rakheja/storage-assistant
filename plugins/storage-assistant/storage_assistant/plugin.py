@@ -28,12 +28,13 @@ PLUGIN_INSTRUCTIONS = (
     "2) storage_start_scan scans everything (including .git, node_modules and iCloud-only files; up to 15 minutes for huge folders) "
     "and shows a treemap when done. If it returns state running, tell the person it is still scanning and call storage_scan_status "
     "again until it finishes; each call waits up to about 50 seconds. Do not pass limits. "
-    "3) ALWAYS call storage_render_view to show the person an interactive treemap of the folder, then answer using real names and "
-    "paths from storage_query (largest_files, children, by_category; drill in with withinNodeId). "
+    "3) The finished scan result already shows the person a treemap, so do NOT call storage_render_view after a scan. "
+    "Answer using real names and paths from storage_query (largest_files, children, by_category; drill in with withinNodeId). "
+    "Call storage_render_view only when the person asks to see a subfolder, the other size measure or file types. "
     "Report sizes in MB/GB and describe coverage using the coverageSummary field (do not infer limits from the limits settings). "
     "Categories and age never prove something is safe to delete; allocated estimates are not reclaimable bytes. "
     "There is no delete capability: suggest what to review, and the person decides in Finder.")
-PLUGIN_LIMITS = {"maxEntries": 600000, "maxDepth": 128, "maxDurationMs": 900000}
+PLUGIN_LIMITS = {"maxEntries": 1000000, "maxDepth": 128, "maxDurationMs": 900000}
 SCAN_WAIT = 50
 GAP_WORDS = {"cloud_placeholder": "iCloud-only items not downloaded (they use no local space)",
              "symlink": "links not followed", "excluded": "credential folders and keys skipped (.ssh, .aws, .env, keys)",
@@ -59,7 +60,8 @@ def coverage_summary(data, cloud_only=0):
     return (("Stopped early; totals are a lower bound. " if stopped else "Everything reachable was measured. Not counted: ")
             + "; ".join(parts) + "." + cloud)
 RENDER_DESCRIPTION = ("Show the person an interactive treemap and table of the scanned folder (inline in the chat where supported, "
-                      "and in the local browser view). Call this after every scan and whenever they want to see or explore space. "
+                      "and in the local browser view). A finished scan already shows one; use this only when the person asks to see a subfolder, "
+                      "the other size measure or file types. "
                       "Use withinNodeId to open a subfolder; selectionIds highlights items you mention.")
 
 PLUGIN_TOOLS = [
@@ -199,7 +201,8 @@ class Plugin:
             scan = self.engine.scan
             if not scan:
                 return 0
-            return sum(1 for n in scan["nodes"].values() if n["kind"] == "file" and n["placeholder"] == "yes")
+            return sum(n.get("cloudOnlyFiles", 1 if n["placeholder"] == "yes" else 0)
+                       for n in scan["nodes"].values() if n["kind"] == "file")
 
     def choose(self, args):
         path = args.get("path")

@@ -76,6 +76,8 @@ button:disabled,select:disabled{opacity:.5;cursor:default}
 #legend li{display:flex;align-items:center;gap:6px}
 #legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
 
+#notice{margin:0 0 12px;padding:8px 12px;border-radius:8px;background:var(--raised);font-size:13px;line-height:1.5}
+#notice:empty{display:none}
 #coverage{font-size:13px;color:var(--muted);margin:10px 0 4px;line-height:1.5}
 
 /* Biggest items, with bars proportional to the largest on the page. */

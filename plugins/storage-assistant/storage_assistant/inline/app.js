@@ -114,13 +114,19 @@
     const crumbs=v.breadcrumbs.map(n=>button(n.displayLabel,()=>load({withinNodeId:n.nodeId,aggregate:'children'},true)));
     if(crumbs.length)crumbs[crumbs.length-1].setAttribute('aria-current','location');
     $('breadcrumbs').replaceChildren(...crumbs);
-    const total=element('strong',bytes(v.within[metric]));
+    const cut=['entry_limit','time_limit','metadata_delayed'].some(k=>(v.gapCounts||{})[k]>0);
+    const total=element('strong',(cut?'at least ':'')+bytes(v.within[metric]));
     const noun=v.aggregate==='children'?(v.matchingRows===1?'item':'items'):(v.matchingRows===1?'file type':'file types');
     $('summary').replaceChildren(total,document.createTextNode(`${v.basis==='logical'?'in':'on disk across'} ${v.matchingRows.toLocaleString()} ${noun}`));
     // Gap keys/counts are validated before display; host strings never become HTML.
     const words={cloud_placeholder:'iCloud-only',symlink:'link',excluded:'protected',denied:'access denied',changed:'changed while scanning',other_volume:'other disk',time_limit:'time limit reached',entry_limit:'item limit reached',depth_limit:'too deeply nested',allocation_unknown:'unknown disk usage',provider_unknown:'unknown cloud status',unsupported:'special file',metadata_delayed:'scan cut short',unavailable:'scanner error'};
     const gaps=Object.entries(v.gapCounts||{}).filter(([k,n])=>/^[a-z_]{1,40}$/.test(k)&&Number.isSafeInteger(n)&&n>0).slice(0,30);
     $('coverage').textContent=gaps.length?`Not counted: ${gaps.map(([k,n])=>`${n.toLocaleString()} ${words[k]||k.replace(/_/g,' ')}`).join(', ')}.`:'Everything in this folder was measured.';
+    const lg=v.within.logicalBytes===null?0:Number(v.within.logicalBytes), al=v.within.allocatedEstimateBytes===null?0:Number(v.within.allocatedEstimateBytes);
+    $('notice').textContent=[
+      cut?'The scan stopped before the end of this folder, so these totals are too low. Try a smaller folder for complete numbers.':'',
+      lg>al*1.25&&lg-al>100e6?`${bytes(String(Math.round(lg-al)))} of this is not stored on this Mac (iCloud-only or sparse files). ${v.basis==='logical'?'Switch to Space on disk to see what this Mac actually holds.':''}`:''
+    ].filter(Boolean).join(' ');
     if(v.unknownAllocationCount)$('coverage').textContent+=` ${v.unknownAllocationCount.toLocaleString()} ${v.unknownAllocationCount===1?'file has':'files have'} unknown disk usage.`;
     $('caption').textContent=v.aggregate==='children'?'Items in this folder, largest first':'File types in this folder, largest first';
     const largest=v.rows.reduce((m,r)=>r.bytes===null?m:Math.max(m,Number(r.bytes)),0)||1;

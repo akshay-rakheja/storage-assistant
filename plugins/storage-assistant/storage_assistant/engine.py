@@ -142,7 +142,11 @@ class Engine:
                         # Keep only what queries use: identity matters only for hardlinked files.
                         del event["event"], event["modifiedNs"]
                         if event.pop("hardlinkCount", 0) <= 1:
-                            del event["identity"]
+                            # Paths only order hardlink attribution; single-link entries need neither.
+                            del event["identity"], event["relative"]
+                        parent = scan["nodes"].get(event["parentId"])
+                        if parent:
+                            event["parentId"] = parent["nodeId"]  # share one string per ID
                         for key in ("kind", "category", "placeholder", "protection"):
                             event[key] = sys.intern(event[key])
                         scan["nodes"][event["nodeId"]] = event
@@ -194,7 +198,7 @@ class Engine:
             return
         seen = {}
         nodes = scan["nodes"]
-        for node in sorted(nodes.values(), key=lambda n: n["relative"]):
+        for node in sorted(nodes.values(), key=lambda n: n.get("relative", "")):
             skipped = any(g in node["gaps"] for g in ("excluded", "cloud_placeholder", "other_volume", "changed", "denied"))
             node["logicalBytes"] = "0" if skipped else node["rawLogicalBytes"]
             node["allocatedEstimateBytes"] = "0" if skipped else node["rawAllocatedBytes"]
@@ -262,6 +266,8 @@ class Engine:
         result["categoryEvidence"] = ["Extension hint v1; no content inspection and no disposal inference."]
         if local:
             result["itemLogicalBytes"] = node["rawLogicalBytes"]
+        if "groupedFiles" in node:
+            result["groupedFiles"] = node["groupedFiles"]  # one entry standing for many small files
         if self.share_names:
             result["path"] = self.relative_path(node)
             if node["parentId"] is None and self.grant:

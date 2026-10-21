@@ -37,7 +37,8 @@ Restart the ChatGPT app, open the Plugins Directory, install **Storage Assistant
 
 - **Name the folder** in your question: "…in ~/Downloads", "…in ~/Desktop/Projects". If you don't, a folder picker opens.
 - macOS may ask once whether Claude can access that folder. Allow it.
-- **Everything is counted**, including `node_modules`, `.git` and iCloud-only files. Big folders can take a few minutes (up to 15 minutes or 600,000 items); the assistant tells you while it is still scanning.
+- **Everything is counted**, including `node_modules`, `.git` and iCloud-only files. Files under 1 MB are grouped per folder (for example "5,021 small code files") so even huge folders are measured completely: a 2.8-million-file Documents folder took under 3 minutes in testing. The assistant tells you while it is still scanning.
+- **File size vs Space on disk:** if iCloud keeps your files in the cloud, "File size" can be many times larger than what your Mac actually stores. The treemap says so when that happens.
 - In the treemap, click a folder to open it, use the path at the top to go back, and switch between **Items** and **File types**, or **File size** and **Space on disk**.
 - Want the full-size map with every name? Ask it to "open the local view".
 

@@ -91,7 +91,7 @@ class PluginTests(unittest.TestCase):
     def test_plugin_grant_uses_larger_limits(self):
         self.rpc("initialize")
         limits = self.tool("storage_choose_folder")["data"]["scopes"][0]["limits"]
-        self.assertEqual(limits, {"maxEntries": 600000, "maxDepth": 128, "maxDurationMs": 900000})
+        self.assertEqual(limits, {"maxEntries": 1000000, "maxDepth": 128, "maxDurationMs": 900000})
 
     def test_model_cannot_shrink_scan_limits(self):
         self.rpc("initialize")
@@ -110,9 +110,12 @@ class PluginTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"\0" * size)
         status = self.scanned()
-        names = {n["name"] for n in self.plugin.engine.scan["nodes"].values()}
-        self.assertTrue({"node_modules", "index.js", ".git", "pack.pack"} <= names)
+        nodes = self.plugin.engine.scan["nodes"]
+        names = {n["name"] for n in nodes.values()}
+        self.assertTrue({"node_modules", ".git", "1 small code file", "1 small other file"} <= names)
         self.assertNotIn("id_ed25519", names)
+        project = next(n for n in nodes.values() if n["name"] == "project")
+        self.assertEqual(project["logicalBytes"], "12000")  # small files are grouped, never dropped
         self.assertEqual(status["gapCounts"]["excluded"], 2)  # .ssh and notes/.env
         self.assertIn("credential folders and keys skipped", status["coverageSummary"])
 
@@ -174,6 +177,45 @@ class PluginProcessTests(unittest.TestCase):
         process = subprocess.run([sys.executable, str(ROOT / "run.py"), "plugin", "--root", "/"], cwd=ROOT,
                                  capture_output=True, text=True, timeout=20)
         self.assertNotEqual(process.returncode, 0)
+
+
+
+
+class GroupingTests(unittest.TestCase):
+    def test_many_small_files_fit_under_the_item_limit_with_exact_totals(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve() / "many"
+            expected = 0
+            for d in range(30):
+                folder = root / f"pkg{d}" / "lib"
+                folder.mkdir(parents=True)
+                for f in range(100):
+                    (folder / f"m{f}.js").write_bytes(b"x" * (f + 1))
+                    expected += f + 1
+            (root / "big.mov").write_bytes(b"\0" * 2_000_000)
+            expected += 2_000_000
+            from storage_assistant import plugin as plugin_module
+            original = plugin_module.PLUGIN_LIMITS
+            plugin_module.PLUGIN_LIMITS = dict(original, maxEntries=200)  # 3,031 files but only ~100 stored entries
+            try:
+                p = Plugin(chooser=lambda: str(root), opener=lambda url: True)
+                try:
+                    grant = p.invoke("storage_choose_folder", {})["structuredContent"]["data"]["scopes"][0]["grantId"]
+                    data = p.invoke("storage_start_scan", {"grantId": grant, "requestId": opaque()})["structuredContent"]["data"]
+                    while data["state"] == "running":
+                        data = p.invoke("storage_scan_status", {"scanId": data["scanId"]})["structuredContent"]["data"]
+                    self.assertEqual(data["state"], "complete", data["gapCounts"])
+                    self.assertEqual(data["logicalBytes"], str(expected))
+                    self.assertLess(data["observedEntries"], 200)
+                    rows = p.invoke("storage_query", {"scanId": data["scanId"], "scanVersion": data["scanVersion"],
+                                                      "basis": "logical", "aggregate": "largest_files", "pageSize": 3})["structuredContent"]["data"]["rows"]
+                    self.assertEqual(rows[0]["displayLabel"], "big.mov")
+                    self.assertEqual(rows[1]["displayLabel"], "100 small code files")
+                    self.assertEqual(rows[1]["groupedFiles"], 100)
+                finally:
+                    p.close()
+            finally:
+                plugin_module.PLUGIN_LIMITS = original
 
 
 if __name__ == "__main__":
