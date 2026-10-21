@@ -82,6 +82,40 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(suggest["_meta"]["ui"]["resourceUri"], UI_URI)
         self.assertTrue(suggest["annotations"]["readOnlyHint"])
 
+    def test_non_apps_client_gets_no_action_tools(self):
+        """C1: without MCP Apps there is no view to click, so the model never sees or reaches the action tools."""
+        for capabilities in ({}, {"extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html"]}}},
+                             {"extensions": {"io.modelcontextprotocol/ui": {}}}):
+            with self.subTest(capabilities=capabilities):
+                plain = Plugin(chooser=lambda: self.choice, opener=lambda url: True)
+                try:
+                    plain.protocol.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                           "params": {"protocolVersion": "2025-11-25", "capabilities": capabilities}})
+                    listed = {t["name"] for t in plain.protocol.handle(
+                        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]}
+                    self.assertFalse(listed & set(VIEW_ONLY), listed)
+                    self.assertIn("storage_suggest_cleanup", listed)
+                    self.assertIn("storage_open_local_view", listed)
+                    for name, args in (("storage_cleanup_preview", {"scanId": "ab" * 16, "scanVersion": 1,
+                                                                    "nodeIds": ["cd" * 16], "action": "delete"}),
+                                       ("storage_cleanup_execute", {"token": "ab" * 16}),
+                                       ("storage_cleanup_settings", {"optIn": {"gitHealth": True}, "openTrash": True})):
+                        body = plain.protocol.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                                      "params": {"name": name, "arguments": args}})["result"]["structuredContent"]
+                        self.assertFalse(body["ok"])
+                        self.assertEqual(body["error"]["code"], "UNSUPPORTED")
+                        self.assertIn("storage_open_local_view", body["error"]["message"])
+                    self.assertEqual(plain.cleanup.opt_in, set())  # the refused settings call changed nothing
+                finally:
+                    plain.close()
+
+    def test_apps_client_can_call_action_tools(self):
+        self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": UI})
+        listed = {t["name"] for t in self.rpc("tools/list")["result"]["tools"]}
+        self.assertTrue(set(VIEW_ONLY) <= listed)
+        body = self.tool("storage_cleanup_settings", {"optIn": {"gitHealth": False}})
+        self.assertTrue(body["ok"], body)
+
     def test_suggest_returns_candidates_and_view(self):
         status = self.scanned(UI)
         result = self.tool("storage_suggest_cleanup", {"scanId": status["scanId"], "scanVersion": status["scanVersion"]})

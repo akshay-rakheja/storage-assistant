@@ -97,6 +97,14 @@ APP_ONLY = {"storage_cleanup_preview", "storage_cleanup_execute", "storage_clean
 SCHEMAS = {name: schema for name, _, schema in PLUGIN_TOOLS}
 
 
+NO_VIEW = ("Cleanup actions run only from the person's click in a view, and this host has no inline view. "
+           "Call storage_open_local_view and ask the person to review and act there.")
+
+
+def _refuse_without_view():
+    raise StorageError("UNSUPPORTED", NO_VIEW)
+
+
 def envelope(fn):
     try:
         body = {"ok": True, "data": fn(), "asOf": time.time()}
@@ -115,6 +123,9 @@ class PluginProtocol(Protocol):
             extra = []
             for name, description, schema in PLUGIN_TOOLS:
                 changes = name in APP_ONLY
+                if changes and not self.ui_supported:
+                    # No MCP Apps view to click: the action tools do not exist for this client.
+                    continue
                 entry = {"name": name, "description": description, "inputSchema": schema,
                          "annotations": {"readOnlyHint": not changes, "destructiveHint": changes, "openWorldHint": False}}
                 if changes:
@@ -167,6 +178,10 @@ class Plugin:
         return result
 
     def _invoke(self, name, args):
+        if name in APP_ONLY and not self.protocol.ui_supported:
+            # Only an MCP Apps view (the person's click) may reach the action tools; other hosts use the paired
+            # local view, which calls the executor directly and never goes through MCP.
+            return envelope(_refuse_without_view)
         if name.startswith("storage_cleanup_") or name == "storage_suggest_cleanup":
             return envelope(lambda: self.cleanup_tool(name, args))
         if name in SCHEMAS:
