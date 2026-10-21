@@ -106,7 +106,8 @@ class Engine:
             self.version += 1
             scan = {"scanId": opaque(), "scanVersion": self.version, "state": "running",
                     "coverage": "partial", "nodes": {}, "gapCounts": collections.Counter(),
-                    "started": time.monotonic(), "asOf": time.time(), "limits": selected_limits}
+                    "started": time.monotonic(), "startedAt": time.time(), "asOf": time.time(),
+                    "limits": selected_limits}
             self.scan = scan
             self.cursors.clear()
             self.view = {}

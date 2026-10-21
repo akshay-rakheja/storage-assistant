@@ -39,14 +39,15 @@ RESCANNED = "This folder was rescanned. Review again."
 TRASH_NOTE = "Space is freed when you empty the Trash."
 # Not in the plan's list: Remove Download returned but macOS still reports the file as downloaded.
 NOT_EVICTED = "macOS did not confirm the download was removed"
-_BLOCKING_GAPS = ("excluded", "other_volume", "denied", "changed", "cloud_placeholder", "unsupported",
-                  "depth_limit", "provider_unknown", "allocation_unknown")
+PARTLY = "Partly deleted: "
+# Scan-level stop reasons: the worker may have stopped (or been stopped) before seeing every folder's contents.
+_SCAN_STOPPED = ("time_limit", "entry_limit", "unavailable", "metadata_delayed", "cancelled")
 
 
 class _Skip(Exception):
-    def __init__(self, reason):
+    def __init__(self, reason, failed=False):
         super().__init__(reason)
-        self.reason = reason
+        self.reason, self.failed = reason, failed  # failed: the executor was entered
 
 
 def _os_reason(error):
@@ -156,7 +157,8 @@ class Cleanup:
                     while len(self.tokens) >= MAX_TOKENS:
                         self.tokens.pop(next(iter(self.tokens)))
                     self.tokens[token] = {"grantId": engine.grant.grant_id, "scanId": scan_id,
-                                          "scanVersion": scan_version, "asOf": scan["asOf"], "action": action,
+                                          "scanVersion": scan_version, "asOf": scan["asOf"],
+                                          "startedAt": scan.get("startedAt", scan["asOf"]), "action": action,
                                           "items": items, "count": len(items), "bytes": total, "expiresAt": expires}
         public = ("nodeId", "displayLabel", "path", "freesBytes", "reasons", "warnings")
         return {"token": token, "expiresAt": expires if token else None, "action": action,
@@ -206,12 +208,15 @@ class Cleanup:
             raise _Skip(ICLOUD_ONLY)
         if newest[node["nodeId"]] >= (now - signals.RECENT) * 1e9:
             raise _Skip(RECENT)
+        # Incompletely seen items are never offered, whatever the action: any gap below other than links
+        # (never followed; the delete walk checks they stay inside), or a folder in a scan that stopped early.
+        if (any(g != "symlink" for n in subtree for g in n["gaps"])
+                or node["kind"] == "directory" and any(scan["gapCounts"].get(r) for r in _SCAN_STOPPED)):
+            raise _Skip(NOT_OFFERED)
         candidate = offered.get(node["nodeId"])
         if candidate and action in candidate["actions"]:
             return candidate, []
         if action != "trash" or node["protection"] == "protected":
-            raise _Skip(NOT_OFFERED)
-        if any(g in _BLOCKING_GAPS for n in subtree for g in n["gaps"]):
             raise _Skip(NOT_OFFERED)
         warnings = []
         if any(n["protection"] == "protected" for n in subtree[1:]):
@@ -223,14 +228,22 @@ class Cleanup:
         relative = self.engine.relative_path(node)
         expected = {"relative": relative, "kind": node["kind"], "modifiedNs": node.get("modifiedNs"),
                     "size": int(node["rawLogicalBytes"]) if node["kind"] == "file" else None}
-        st = self._with_item(expected, scan["asOf"], None, lambda parent, name, st: st, check_walk=action == "delete",
+        st = self._with_item(expected, self._times(scan, self.clock()), None, lambda parent, name, st: st, check_walk=action == "delete",
                              policy_reason=NOT_OFFERED)
         expected["identity"] = identity(st)
         return expected
 
     # Revalidation
 
-    def _with_item(self, item, as_of, bound, act, check_walk, policy_reason=CHANGED):
+    @staticmethod
+    def _times(scan, now):
+        """Change limits in ns: leaf ctime after the scan; below a folder, anything since the scan began
+        (the scanner may have passed that folder earlier) or modified in the last 7 days."""
+        started = scan.get("startedAt", scan["asOf"])
+        return {"asOf": scan["asOf"] * 1e9, "started": started * 1e9,
+                "modified": min(started, now - signals.RECENT) * 1e9}
+
+    def _with_item(self, item, times, bound, act, check_walk, policy_reason=CHANGED):
         """Open the item's parent from the grant without following links, check the leaf, then act."""
         parts = item["relative"].split("/")
         if not parts or any(p in ("", ".", "..") or "\0" in p for p in parts):
@@ -251,20 +264,20 @@ class Cleanup:
             kind_ok = stat.S_ISREG(st.st_mode) if item["kind"] == "file" else stat.S_ISDIR(st.st_mode)
             if (not kind_ok or st.st_dev != device or st.st_mtime_ns != item["modifiedNs"]
                     or item["size"] is not None and st.st_size != item["size"]
-                    or st.st_ctime_ns > as_of * 1e9 or bound is not None and identity(st) != bound
+                    or st.st_ctime_ns > times["asOf"] or bound is not None and identity(st) != bound
                     or item["kind"] == "file" and st.st_nlink != 1):
                 raise _Skip(CHANGED)
             if check_walk and stat.S_ISDIR(st.st_mode):
-                self._walk_item(parent, name, st, as_of, policy_reason)
+                self._walk_item(parent, name, st, times, policy_reason)
             return act(parent, name, st)
         finally:
             for fd in reversed(opened):
                 os.close(fd)
 
-    def _walk_item(self, parent, name, st, as_of, policy_reason):
+    def _walk_item(self, parent, name, st, times, policy_reason):
         """Every entry below a folder to delete: not newer than the scan, same disk, no credentials,
         no iCloud-only files and no links leading out of the folder. Bounded."""
-        limit, count = as_of * 1e9, [0]
+        count = [0]
 
         def visit(fd, rel, depth):
             if depth > MAX_DEPTH:
@@ -276,7 +289,7 @@ class Cleanup:
                 if count[0] > MAX_ENTRIES:
                     raise _Skip(TOO_MANY)
                 info = os.stat(child, dir_fd=fd, follow_symlinks=False)
-                if max(info.st_mtime_ns, info.st_ctime_ns) > limit:
+                if info.st_ctime_ns >= times["started"] or info.st_mtime_ns >= times["modified"]:
                     raise _Skip(CHANGED)
                 if (skipped_in_full(child) or info.st_dev != st.st_dev or child.endswith(".icloud")
                         or getattr(info, "st_flags", 0) & DATALESS):
@@ -327,15 +340,17 @@ class Cleanup:
             scan = self._current(record["scanId"], record["scanVersion"])
             action, path = record["action"], engine.grant.path
             before = self._free(path)
-            done, skipped, called, rescan = [], [], [], None
+            done, skipped, failed, called, rescan = [], [], [], [], None
+            times = self._times(record, self.clock())
             try:
                 for item in record["items"]:
                     try:
-                        outcome = self._with_item(item, record["asOf"], item["identity"],
+                        outcome = self._with_item(item, times, item["identity"],
                                                   self._act(action, item, called), check_walk=action == "delete")
                     except _Skip as skip:
-                        skipped.append({"nodeId": item["nodeId"], "displayLabel": item["displayLabel"],
-                                        "reason": skip.reason})
+                        reason = PARTLY + skip.reason if skip.failed and action == "delete" else skip.reason
+                        (failed if skip.failed else skipped).append(
+                            {"nodeId": item["nodeId"], "displayLabel": item["displayLabel"], "reason": reason})
                         continue
                     entry = {"nodeId": item["nodeId"], "displayLabel": item["displayLabel"], "path": item["path"],
                              "freesBytes": item["freesBytes"]}
@@ -346,7 +361,7 @@ class Cleanup:
             finally:  # also after an unexpected error: whatever was acted on makes the snapshot stale
                 if called:
                     rescan = self._rescan(scan)
-        return {"action": action, "done": done, "skipped": skipped,
+        return {"action": action, "done": done, "skipped": skipped, "failed": failed,
                 "freedEstimateBytes": str(sum(int(d["freesBytes"]) for d in done)),
                 "freeSpaceBefore": before, "freeSpaceAfter": after,
                 "putBack": action == "trash" and any(d["putBack"] for d in done),
@@ -365,19 +380,20 @@ class Cleanup:
                     except OSError:  # the name is gone (or no longer visible): macOS moved it
                         return result
                     if identity(after) == identity(st):
-                        raise _Skip(CHANGED)  # macOS reported success but the item is still here
+                        raise _Skip(CHANGED, failed=True)  # macOS reported success but the item is still here
                     return result
                 if action == "delete":
                     return self.executor.delete(parent, name, MAX_ENTRIES)
                 self.executor.evict(abs_path)
                 after = os.stat(name, dir_fd=parent, follow_symlinks=False)
                 if identity(after) != identity(st) or not getattr(after, "st_flags", 0) & DATALESS:
-                    raise _Skip(NOT_EVICTED)
+                    raise _Skip(NOT_EVICTED, failed=True)
                 return None
-            except CleanupRefused as refused:
-                raise _Skip(TOO_MANY if refused.reason == "too_many" else CHANGED) from None
+            except CleanupRefused as refused:  # "too_many" is raised before anything is removed
+                too_many = refused.reason == "too_many"
+                raise _Skip(TOO_MANY if too_many else CHANGED, failed=not too_many) from None
             except OSError as error:
-                raise _Skip(_os_reason(error)) from None
+                raise _Skip(_os_reason(error), failed=True) from None
         return act
 
     @staticmethod

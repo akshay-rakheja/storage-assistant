@@ -148,6 +148,7 @@ class CleanupTests(unittest.TestCase):
         self.assertTrue(receipt["putBack"])
         self.assertTrue(all(d["trashPath"].startswith(str(self.trash)) for d in receipt["done"]))
         self.assertEqual(receipt["trashNote"], "Space is freed when you empty the Trash.")
+        self.assertEqual(receipt["failed"], [])
         self.assertEqual([c[0] for c in self.executor.calls], ["trash", "trash"])
         self.assertEqual({c[1] for c in self.executor.calls},
                          {str(self.root / "a.crdownload"), str(self.root / "b.part")})
@@ -276,10 +277,30 @@ class CleanupTests(unittest.TestCase):
         plan = self.preview(["a.crdownload", "b.part"])
         receipt = self.cleanup.execute(plan["token"])
         self.assertEqual([d["path"] for d in receipt["done"]], ["a.crdownload"])
-        self.assertEqual([(s["displayLabel"], s["reason"]) for s in receipt["skipped"]],
+        self.assertEqual(receipt["skipped"], [])  # the executor was entered: failed, not skipped
+        self.assertEqual([(s["displayLabel"], s["reason"]) for s in receipt["failed"]],
                          [("b.part", "macOS denied access")])
         self.assertTrue((self.root / "b.part").exists())
         self.assertEqual([c[0] for c in self.executor.calls], ["trash"])  # never falls back to delete
+
+    def test_denied_delete_is_reported_as_partly_deleted(self):
+        self.node_modules()
+        self.make("a.crdownload", 3000)
+        self.age_dirs()
+        self.executor = FakeExecutor(str(self.trash), fail={"node_modules": PermissionError(13, "Permission denied")})
+        self.scan()
+        self.suggest()
+        plan = self.preview(["p/node_modules", "a.crdownload"], "delete")
+        self.assertEqual(plan["count"], 2)
+        receipt = self.cleanup.execute(plan["token"])
+        self.assertEqual([d["path"] for d in receipt["done"]], ["a.crdownload"])
+        self.assertEqual(receipt["skipped"], [])
+        self.assertEqual([(f["displayLabel"], f["reason"]) for f in receipt["failed"]],
+                         [("node_modules", "Partly deleted: macOS denied access")])
+        self.assertEqual(receipt["freedEstimateBytes"],
+                         next(i["freesBytes"] for i in plan["items"] if i["path"] == "a.crdownload"))
+        self.assertEqual(self.executor.calls, [("delete", "a.crdownload")])
+        self.assertIsNotNone(receipt["rescan"])
 
     def test_too_many_inside_is_reported(self):
         from storage_assistant.executor import CleanupRefused
@@ -290,6 +311,7 @@ class CleanupTests(unittest.TestCase):
         plan = self.preview(["p/node_modules"], "delete")
         receipt = self.cleanup.execute(plan["token"])
         self.assertEqual(receipt["skipped"][0]["reason"], "Too many files inside to check safely")
+        self.assertEqual(receipt["failed"], [])  # refused before anything was removed
         self.assertTrue((self.root / "p/node_modules/left-pad/index.js").exists())
 
     def test_delete_only_for_safe_tier(self):
@@ -375,6 +397,64 @@ class CleanupTests(unittest.TestCase):
                 self.plugin = None
                 shutil.rmtree(self.root)
                 self.root.mkdir()
+
+    def test_delete_walk_catches_files_added_during_the_scan(self):
+        self.node_modules()
+        self.scan()
+        self.suggest()
+        plan = self.preview(["p/node_modules"], "delete")
+        self.assertEqual(plan["count"], 1)
+        # As if the scanner had passed left-pad/ before a tool wrote new.bin and the scan finished later:
+        # the file is older than asOf, but not older than the scan's start.
+        folder = self.root / "p/node_modules/left-pad"
+        when = os.stat(folder).st_mtime
+        self.make("p/node_modules/left-pad/new.bin", 10, age_days=60)
+        os.utime(folder, (when, when))  # only the ctimes show the change now
+        later = time.time() + 3600
+        self.plugin.engine.scan["asOf"] = later
+        self.cleanup.tokens[plan["token"]]["asOf"] = later
+        receipt = self.cleanup.execute(plan["token"])
+        self.assertEqual([(s["displayLabel"], s["reason"]) for s in receipt["skipped"]],
+                         [("node_modules", "Changed since you reviewed it")])
+        self.assertEqual(self.executor.calls, [])
+        self.assertTrue((self.root / "p/node_modules/left-pad/index.js").exists())
+
+    def test_delete_walk_applies_the_seven_day_rule_below_the_folder(self):
+        self.node_modules()
+        recent = self.make("p/node_modules/left-pad/recent.js", 2 * MB, age_days=3)
+        self.age_dirs()
+        self.scan()
+        engine = self.plugin.engine
+        with engine.lock:  # the snapshot believes the file is old; the disk says 3 days
+            engine.scan["nodes"][self.node_id("p/node_modules/left-pad/recent.js")]["modifiedNs"] = int(
+                (self.now - 60 * DAY) * 1e9)
+        self.assertEqual(self.suggest()["p/node_modules"]["tier"], "safe")
+        plan = self.preview(["p/node_modules"], "delete")
+        self.assertEqual(self.skipped(plan), {"node_modules": "Changed since you reviewed it"})
+        self.assertIsNone(plan["token"])
+        self.assertTrue(recent.exists())
+
+    def test_folders_the_scan_did_not_finish_are_not_offered(self):
+        self.make("Projects/old.bin", 2 * MB)
+        self.make("Projects/sub/older.bin", 2 * MB)
+        self.make("a.crdownload", 3000)
+        self.age_dirs()
+        self.scan()
+        engine = self.plugin.engine
+        sub = self.node_id("Projects/sub")
+        with engine.lock:  # the worker stopped while listing Projects/sub
+            engine.scan["nodes"][sub]["gaps"].append("time_limit")
+            engine.scan["nodes"][sub]["coverage"] = "partial"
+        self.suggest()
+        for action in ("trash", "delete"):
+            plan = self.preview(["Projects"], action)
+            self.assertEqual(self.skipped(plan), {"Projects": "Not offered for this action"})
+        with engine.lock:  # the engine killed the worker at its deadline: no folder is known to be complete
+            engine.scan["nodes"][sub]["gaps"].remove("time_limit")
+            engine.scan["gapCounts"]["time_limit"] += 1
+        plan = self.preview(["Projects/sub", "Projects/old.bin", "a.crdownload"])
+        self.assertEqual(self.skipped(plan), {"sub": "Not offered for this action"})
+        self.assertEqual(sorted(i["path"] for i in plan["items"]), ["Projects/old.bin", "a.crdownload"])
 
     def test_delete_refuses_link_out_of_folder(self):
         self.node_modules()
