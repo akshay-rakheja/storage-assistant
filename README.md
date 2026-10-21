@@ -63,7 +63,7 @@ Two **optional checks** are off until you switch them on in the view, and read a
 ## Privacy
 
 - **Shared with the assistant:** file and folder names, paths inside the folder you chose, sizes and dates. They become part of your conversation, like anything you paste.
-- **Never read:** file contents, except by the two optional clean-up checks above, and only while you have them switched on.
+- **Never read:** file contents are never read by Storage Assistant, except by the two optional clean-up checks above, and only while you have them switched on. **Quick Look** in the local view is macOS showing the file to you when you click it; nothing from it goes to the assistant.
 - **Never scanned:** your whole home folder, system folders, `~/Library`, other disks, and credential stores (`.ssh`, `.aws`, `.gnupg`, `.env`, key files).
 - **iCloud-only files** are counted at their full size but take no space on your Mac. They are never downloaded.
 - **Only your click changes anything:** moving to the Trash, deleting or removing downloads happens only when you click the button in the treemap or local view. Claude can suggest items but cannot call the actions that change files, and every item is checked again just before anything happens.

@@ -1,7 +1,7 @@
 {
   "name": "storage-assistant",
   "version": "0.6.0",
-  "description": "Ask what's taking up space in a folder on your Mac and explore it as a treemap. Read-only: never opens or deletes files.",
+  "description": "See what's taking up space in a folder on your Mac as a treemap, and clear it with one click: Move to Trash, Delete permanently or Remove Download. Nothing changes unless you click.",
   "author": {
     "name": "Akshay Rakheja"
   },

@@ -4,7 +4,8 @@ import sys
 from .policy import StorageError
 
 PROMPT = ("Storage Assistant: choose ONE folder to measure. It reads file and folder names, sizes and dates "
-          "and shares them with your assistant. File contents are never opened and nothing is changed.")
+          "and shares them with your assistant. File contents are never opened. Nothing changes unless you click "
+          "a cleanup action in the view.")
 # Activate first so the dialog opens in front of the host app instead of behind it.
 SCRIPT = f'tell current application to activate\nPOSIX path of (choose folder with prompt "{PROMPT}")'
 TIMEOUT = 300

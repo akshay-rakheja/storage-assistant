@@ -294,3 +294,26 @@ class GroupingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MetadataWordingTests(unittest.TestCase):
+    """Shipped descriptions match the product: it clears space, but only on the person's click."""
+
+    def test_descriptions_no_longer_claim_read_only(self):
+        import json as _json
+        from pathlib import Path as _Path
+        from storage_assistant import picker
+        root = _Path(__file__).resolve().parent.parent
+        codex = _json.loads((root / "plugins/storage-assistant/plugin.json").read_text())
+        claude = _json.loads((root / "plugins/storage-assistant/.claude-plugin/plugin.json").read_text())
+        mcpb = _json.loads((root / "packaging/mcpb/manifest.json").read_text())
+        self.assertEqual(codex["description"], claude["description"])
+        texts = [codex["description"], codex["extensions"]["com.openai"]["interface"]["shortDescription"],
+                 mcpb["description"], mcpb["long_description"], picker.PROMPT]
+        for text in texts:
+            lowered = text.lower()
+            for stale in ("read-only", "read only", "nothing is changed", "never opens or deletes"):
+                self.assertNotIn(stale, lowered, text)
+        for text in (codex["description"], mcpb["description"], mcpb["long_description"], picker.PROMPT):
+            self.assertIn("unless you click", text)
+        self.assertNotIn('"', picker.PROMPT)  # embedded in an AppleScript string literal
