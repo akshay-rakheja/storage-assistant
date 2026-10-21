@@ -8,8 +8,8 @@ A temp file (`storage-assistant-spike-*`) was trashed through Foundation
 (`trashItemAtURL:resultingItemURL:error:`), which returned the resulting path in `~/.Trash`;
 `os.rename(resulting, original)` then succeeded. Caveat: run from the developer's terminal/agent host,
 whose own privacy grants apply; Task 7/8 should still handle a rename failure by falling back to Open Trash.
-Note: `/usr/bin/trash` does not report the resulting path, so `trash_item` returns `None` through it; Put back
-needs the Foundation path (`macos._foundation_trash`) or a Trash lookup.
+`macos.trash_item` calls Foundation first and returns the Trash path when it succeeds; it falls back to
+`/usr/bin/trash` (returning `None`) only if Foundation fails.
 
 ## mdls
 Batched `mdls -name kMDItemLastUsedDate -name kMDItemWhereFroms` over 300 paths: 0.33 s, exit 0, 600 output

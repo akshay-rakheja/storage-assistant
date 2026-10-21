@@ -26,17 +26,24 @@ def open_trash() -> None:
 
 
 def trash_item(path: str) -> Optional[str]:
-    """Move one item to the Trash. Returns the Trash path when known."""
-    if os.path.exists(TRASH_TOOL):
-        try:
-            done = subprocess.run([TRASH_TOOL, path], stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.PIPE, timeout=60)
-        except (subprocess.SubprocessError, OSError) as error:
-            raise OSError("trash failed: %s" % error)
-        if done.returncode != 0:
-            raise OSError("trash failed: %s" % done.stderr.decode("utf-8", "replace").strip())
-        return None
-    return _foundation_trash(path)
+    """Move one item to the Trash via Foundation and return its Trash path.
+
+    Falls back to /usr/bin/trash (returning None) only if Foundation fails."""
+    try:
+        return _foundation_trash(path)
+    except OSError as foundation_error:
+        if not os.path.exists(TRASH_TOOL):
+            raise
+        if not os.path.lexists(path):
+            raise foundation_error
+    try:
+        done = subprocess.run([TRASH_TOOL, path], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.PIPE, timeout=60)
+    except (subprocess.SubprocessError, OSError) as error:
+        raise OSError("trash failed: %s" % error)
+    if done.returncode != 0:
+        raise OSError("trash failed: %s" % done.stderr.decode("utf-8", "replace").strip())
+    return None
 
 
 def evict_download(path: str) -> None:

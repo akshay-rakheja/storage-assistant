@@ -18,10 +18,16 @@ class MacosTests(unittest.TestCase):
         handle, path = tempfile.mkstemp(prefix="storage-assistant-test-")
         os.close(handle)
         result = macos.trash_item(path)
-        self.assertFalse(os.path.exists(path))
-        if result is not None:
+        try:
+            self.assertFalse(os.path.exists(path))
+            self.assertIsNotNone(result)
             self.assertTrue(os.path.exists(result))
-            os.remove(result)
+            os.rename(result, path)  # Put back
+            self.assertTrue(os.path.exists(path))
+        finally:
+            for leftover in (path, result):
+                if leftover and os.path.exists(leftover):
+                    os.remove(leftover)
 
     @unittest.skipUnless(REAL, "set STORAGE_REAL_MACOS_TESTS=1 to call Foundation")
     def test_evict_requires_icloud_item(self):
