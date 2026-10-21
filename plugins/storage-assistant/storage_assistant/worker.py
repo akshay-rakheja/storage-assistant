@@ -92,12 +92,12 @@ def walk(root_fd, limits, emit, metadata=os.stat, enumerate_dir=os.scandir,
         return state == "yes"
 
     def emit_groups(node_id, relative, groups):
-        for cat, (n, logical, allocated, cloud) in sorted(groups.items()):
+        for cat, (n, logical, allocated, cloud, newest) in sorted(groups.items()):
             name = f"{n:,} small {GROUP_WORDS[cat]} file{'s' if n != 1 else ''}"
             emit({"event": "node", "nodeId": opaque(), "parentId": node_id, "name": name,
                   "relative": relative + "/\uffff" + name, "kind": "file", "category": cat, "placeholder": "no",
                   "rawLogicalBytes": str(logical), "rawAllocatedBytes": str(allocated),
-                  "identity": [0, 0, 0, 0], "modifiedNs": 0, "measuredAt": time.time(), "hardlinkCount": 1,
+                  "identity": [0, 0, 0, 0], "modifiedNs": newest, "measuredAt": time.time(), "hardlinkCount": 1,
                   "protection": "review_required", "groupedFiles": n, "cloudOnlyFiles": cloud})
 
     def visit(fd, node_id, depth, relative, ancestry, in_app=False):
@@ -146,11 +146,12 @@ def walk(root_fd, limits, emit, metadata=os.stat, enumerate_dir=os.scandir,
                     if kind == "file" and st.st_dev == device and not skip(name):
                         cloud = small_file(fd, name, st, in_app)
                         if cloud is not None:
-                            group = groups.setdefault(category(name), [0, 0, 0, 0])
+                            group = groups.setdefault(category(name), [0, 0, 0, 0, 0])
                             group[0] += 1
                             group[1] += st.st_size
                             group[2] += st.st_blocks * 512
                             group[3] += cloud
+                            group[4] = max(group[4], st.st_mtime_ns)  # newest, for activity checks
                             continue
                     child_relative = relative + "/" + name
                     node(child_id, node_id, name, st, kind, child_relative)
