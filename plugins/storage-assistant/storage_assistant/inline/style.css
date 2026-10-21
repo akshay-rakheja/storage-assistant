@@ -137,6 +137,7 @@ td.name .pick>i.gap{width:16px;flex:none}
 .who small{color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .amt{font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--muted)}
 .warn{color:var(--danger)}
+#review-items li.off .who,#review-items li.off .amt{opacity:.55}
 .optins{border:0;padding:0;margin:10px 0 0;display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13px}
 .optins legend{font-size:12px;color:var(--muted);padding:0;margin-bottom:4px}
 .optins label{display:flex;align-items:center;gap:6px}

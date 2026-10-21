@@ -100,7 +100,8 @@ class PluginTests(unittest.TestCase):
         html = self.rpc("resources/read", {"uri": UI_URI})["result"]["contents"][0]["text"]
         for marker in ('id="tray"', 'id="review"', 'id="confirm-delete"', 'id="receipt"', 'id="optin-git"', 'id="optin-dup"',
                        "Move ", " items to Trash", "Delete permanently", "This can't be undone.", "Open Trash",
-                       "Safe to clear", "Worth a glance", "Review…", "Use Put Back in Finder to restore"):
+                       "Safe to clear", "Worth a glance", "Review…", "Use Put Back in Finder to restore",
+                       'aria-modal="true"', "The result is unknown", "Refresh the map"):
             self.assertIn(marker, html)
         self.assertNotIn("fetch(", html)
         self.assertNotIn("http://", html)

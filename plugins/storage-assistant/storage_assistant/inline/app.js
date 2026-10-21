@@ -161,7 +161,7 @@
       const label=element('span',r.nodeId?r.displayLabel:(CATS[r.displayLabel]||r.displayLabel));
       const c=cleanOn&&r.nodeId?cleanup.byId.get(r.nodeId):null;
       if(r.nodeId){const b=button('',()=>choose(r),r.nodeId===selected?.nodeId||v.selectionIds.includes(r.nodeId));b.append(swatch(kindOf(r)),label);if(c)b.append(chip(c));b.title=r.path||r.displayLabel;
-        if(cleanOn){const pick=element('div');pick.className='pick';if(c){pick.append(checkbox(c,'in the clean-up'));tr.className='tier-'+c.tier;}else{const gap=element('i');gap.className='gap';pick.append(gap);}pick.append(b);name.append(pick);}else name.append(b);}
+        if(cleanOn){const pick=element('div');pick.className='pick';if(c){pick.append(checkbox(c,'in the clean-up','row'));tr.className='tier-'+c.tier;}else{const gap=element('i');gap.className='gap';pick.append(gap);}pick.append(b);name.append(pick);}else name.append(b);}
       else name.append(swatch(kindOf(r)),label);
       const meter=element('div'),bar=element('span'),fill=element('i');meter.className='meter';
       fill.style.width=r.bytes===null?'0':`${Math.max(1,Number(r.bytes)/largest*100)}%`;bar.append(fill);
@@ -205,7 +205,7 @@
   // The executor revalidates everything; the view only shows and forwards ids.
   const TIERS = {safe:'Safe to clear',glance:'Worth a glance',call:'Your call'};
   const ACTIONS = ['trash','evict','delete'];
-  let cleanup = null, ticked = new Set(), seen = new Set(), previews = null, acting = false, resuggest = false, rescanning = null, deleting = null;
+  let cleanup = null, reviewing = [], ticked = new Set(), seen = new Set(), previews = null, acting = false, resuggest = false, rescanning = null, deleting = null;
   const short = (s,n) => typeof s === 'string' && s.length > 0 && s.length <= n;
   function candidate(c) {
     if (!c || !ID.test(c.nodeId) || !label(c) || !short(c.path,4096) || !TIERS[c.tier] || !validBytes(c.freesBytes) || c.freesBytes===null) return null;
@@ -233,11 +233,19 @@
   function toggle(id, on) {
     if (!cleanup?.byId.has(id) || acting) return;
     on ? ticked.add(id) : ticked.delete(id);
-    if (!$('review').hidden) { review(); return; }
-    render();
+    // Re-rendering replaces the controls: keep keyboard focus on the same kind of control for the same item.
+    const a = document.activeElement, key = a?.dataset?.pick ? {pick:a.dataset.pick, node:a.dataset.node} : null;
+    if (!$('review').hidden) { review(key, true); return; }
+    render(); refocus(key);
   }
-  function checkbox(c, where) {
+  function refocus(key) {
+    if (!key) return;
+    const target = [...document.querySelectorAll('[data-pick]')].find(e => e.dataset.pick===key.pick && e.dataset.node===key.node);
+    if (target && !target.disabled) target.focus();
+  }
+  function checkbox(c, where, pick) {
     const x = element('input'); x.type = 'checkbox'; x.checked = ticked.has(c.nodeId); x.disabled = acting;
+    x.dataset.pick = pick; x.dataset.node = c.nodeId;
     x.setAttribute('aria-label', `Include ${c.displayLabel} (${TIERS[c.tier]}) ${where}`);
     x.onchange = () => toggle(c.nodeId, x.checked); return x;
   }
@@ -246,7 +254,7 @@
   function tickToggle(c, t, W, H) {
     // A separate control on top of the tile: clicking the tile itself still opens folders.
     const b = button(ticked.has(c.nodeId) ? '✓' : '', () => toggle(c.nodeId, !ticked.has(c.nodeId)));
-    b.className = 'tick'; b.setAttribute('role','checkbox'); b.setAttribute('aria-checked', String(ticked.has(c.nodeId)));
+    b.className = 'tick'; b.dataset.pick = 'tile'; b.dataset.node = c.nodeId; b.setAttribute('role','checkbox'); b.setAttribute('aria-checked', String(ticked.has(c.nodeId)));
     b.setAttribute('aria-label', `Include ${c.displayLabel} (${TIERS[c.tier]})`); b.title = `${TIERS[c.tier]}: ${c.reasons.join('; ')}`; b.disabled = acting;
     b.style.cssText = `left:calc(${(t.x+t.w)/W*100}% - 27px);top:calc(${t.y/H*100}% + 5px)`; return b;
   }
@@ -256,7 +264,7 @@
     if (!on) { $('tray').hidden = true; return; }
     $('candidates').replaceChildren(...(cleanup.list.length ? cleanup.list.map(c => {
       const li = element('li'); li.className = 'tier-'+c.tier;
-      li.append(checkbox(c,'in the clean-up'), who(c.displayLabel, `${TIERS[c.tier]} · ${c.path}`), chip(c), element('span', bytes(c.freesBytes)));
+      li.append(checkbox(c,'in the clean-up','list'), who(c.displayLabel, `${TIERS[c.tier]} · ${c.path}`), chip(c), element('span', bytes(c.freesBytes)));
       li.lastChild.className = 'amt'; return li;
     }) : [element('li','Nothing to suggest in this folder.')]));
     const chosen = cleanup.list.filter(c=>ticked.has(c.nodeId));
@@ -270,18 +278,22 @@
     const envelope = result?.structuredContent;
     if (envelope?.ok !== true || result?.isError) {
       const m = envelope?.error?.message;
-      throw new Error(short(m,300) ? m : 'The plugin could not do this. Review again.');
+      // A structured refusal: the plugin answered and says what did not happen.
+      throw Object.assign(new Error(short(m,300) ? m : 'The plugin could not do this. Review again.'), {refused:true});
     }
     return envelope.data;
   }
   function busyCleanup(on) { acting = on; for (const id of ['do-trash','do-evict','do-delete','review-back','confirm-yes','confirm-no','open-trash','receipt-close']) $(id).disabled = on; controls(); }
-  async function review() {
+  async function review(key=null, keep=false) {
     if (!cleanup || acting || closing) return;
-    const v = current, chosen = cleanup.list.filter(c=>ticked.has(c.nodeId));
-    $('receipt').hidden = true; $('confirm-delete').hidden = true; $('review').hidden = false; previews = null;
+    // An open review keeps listing items unticked in it, so they can be ticked again (and keep focus).
+    if (!keep) reviewing = cleanup.list.filter(c=>ticked.has(c.nodeId)).map(c=>c.nodeId);
+    const shown = reviewing.map(id=>cleanup.byId.get(id)).filter(Boolean);
+    const v = current, chosen = shown.filter(c=>ticked.has(c.nodeId));
+    $('receipt').hidden = true; $('confirm-delete').hidden = true; $('review').hidden = false; $('check-refresh').hidden = true; previews = null;
     $('review-status').textContent = chosen.length ? 'Checking each item again…' : 'Nothing is ticked.';
     for (const a of ACTIONS) $('do-'+a).hidden = true;
-    renderReview(chosen, {}); renderCleanup(); resize();
+    renderReview(shown, {}); renderCleanup(); resize(); refocus(key);
     if (!chosen.length) return;
     busyCleanup(true);
     const results = {};
@@ -295,16 +307,16 @@
       previews = results; $('review-status').textContent = '';
     } catch (e) { $('review-status').textContent = e.message; }
     finally { busyCleanup(false); }
-    renderReview(chosen, previews || {}); renderCleanup(); resize();
+    renderReview(shown, previews || {}); renderCleanup(); resize(); refocus(key);
   }
   function plan(a) { const p = previews?.[a]; return p && ID.test(p.token||'') && Number.isSafeInteger(p.count) && p.count>0 && validBytes(p.freesBytes) ? p : null; }
   function renderReview(chosen, results) {
     const detail = new Map();
     for (const a of ACTIONS) for (const i of (Array.isArray(results[a]?.items) ? results[a].items : [])) if (ID.test(i?.nodeId) && !detail.has(i.nodeId)) detail.set(i.nodeId, i);
     $('review-items').replaceChildren(...chosen.map(c => {
-      const i = detail.get(c.nodeId), li = element('li'); li.className = 'tier-'+c.tier;
+      const i = detail.get(c.nodeId), li = element('li'); li.className = 'tier-'+c.tier+(ticked.has(c.nodeId)?'':' off');
       const why = (Array.isArray(i?.reasons) ? i.reasons.map(r=>r?.text ?? r) : c.reasons).filter(t=>short(t,300)).join('; ');
-      li.append(checkbox(c,'in this review'), who(c.displayLabel, `${c.path}${why ? ' · '+why : ''}`), element('span', bytes(validBytes(i?.freesBytes) && i.freesBytes ? i.freesBytes : c.freesBytes)));
+      li.append(checkbox(c,'in this review','review'), who(c.displayLabel, `${c.path}${why ? ' · '+why : ''}`), element('span', bytes(validBytes(i?.freesBytes) && i.freesBytes ? i.freesBytes : c.freesBytes)));
       li.lastChild.className = 'amt';
       const warnings = Array.isArray(i?.warnings) ? i.warnings.filter(w=>short(typeof w==='string'?w:w?.text,300)).map(w=>typeof w==='string'?w:w.text) : [];
       if (warnings.length) { const w = element('small', warnings.join('; ')); w.className = 'warn'; li.querySelector('.who').append(w); }
@@ -325,7 +337,7 @@
     $('confirm-text').textContent = d.count===1 ? 'Delete 1 item permanently? This can\'t be undone.' : `Delete ${d.count} items permanently? This can't be undone.`;
     $('confirm-items').replaceChildren(...d.items.filter(label).slice(0,500).map(i => { const li = element('li'); li.append(who(i.displayLabel, short(i.path,4096) ? i.path : '')); return li; }));
     $('confirm-total').textContent = `Frees about ${bytes(d.freesBytes)} on this Mac right away.`;
-    renderCleanup(); resize();
+    renderCleanup(); resize(); $('confirm-no').focus();  // the safe choice has focus
   }
   async function execute(a) {
     const p = a==='delete' ? deleting : plan(a);
@@ -340,8 +352,14 @@
     } catch (e) {
       // Back to a review with no plan: the person ticks and reviews again for a fresh token.
       $('confirm-delete').hidden = true; $('review').hidden = false;
-      renderReview(cleanup ? cleanup.list.filter(c=>ticked.has(c.nodeId)) : [], {});
-      $('review-status').textContent = `${e.message} Nothing more was sent. Go back and review again; Refresh shows the current state.`;
+      renderReview(cleanup ? reviewing.map(id=>cleanup.byId.get(id)).filter(Boolean) : [], {});
+      if (e.refused) $('review-status').textContent = `${e.message} Nothing more was sent. Go back and review again; Refresh shows the current state.`;
+      else {
+        // Timeout or bridge failure: the plugin may have acted before the answer was lost.
+        $('review-status').textContent = 'The result is unknown: no answer came back from the plugin, so some items may already have been moved or deleted. Refresh the map to check what changed before doing anything else.';
+        $('check-refresh').hidden = false;
+      }
+      $('review-title').focus();
     }
     finally { busyCleanup(false); renderCleanup(); resize(); }
   }
@@ -352,7 +370,7 @@
   function receipt(r) {
     const done = (Array.isArray(r?.done) ? r.done : []).filter(label).slice(0,500), a = r?.action;
     for (const id of ['review','confirm-delete']) $(id).hidden = true;
-    $('receipt').hidden = false;
+    $('receipt').hidden = false; $('check-refresh').hidden = true;
     $('receipt-title').textContent = a==='trash' ? 'Moved to the Trash' : a==='evict' ? 'Downloads removed' : 'Deleted';
     const est = validBytes(r?.freedEstimateBytes) && r.freedEstimateBytes ? bytes(r.freedEstimateBytes) : 'an unknown amount';
     $('receipt-summary').textContent = done.length ? (a==='trash' ? `Moved ${items(done.length)} to the Trash (about ${est}).` : a==='evict' ? `Removed ${done.length===1?'1 download':done.length.toLocaleString()+' downloads'} from this Mac (about ${est}); they stay in iCloud.` : `Deleted ${items(done.length)} (about ${est}).`) : 'Nothing was changed.';
@@ -368,6 +386,7 @@
     if (r?.rescan?.started && ID.test(r.rescan.scanId||'')) {
       $('receipt-status').textContent = 'Updating the map…'; resuggest = true; rescanning = r.rescan.scanId; following = null; follow(r.rescan.scanId);
     } else $('receipt-status').textContent = done.length ? 'Refresh to update the map.' : '';
+    $('receipt-title').focus();
   }
   async function settings(change, openTrash=false) {
     if (!caps.serverTools || acting) return;
@@ -412,7 +431,10 @@
   $('do-evict').onclick = () => execute('evict');
   $('do-delete').onclick = confirmDelete;
   $('confirm-yes').onclick = () => execute('delete');
-  $('confirm-no').onclick = () => { if (acting) return; deleting = null; $('confirm-delete').hidden = true; review(); };
+  function cancelDelete() { if (acting) return; deleting = null; $('confirm-delete').hidden = true; review(null, true); $('review-title').focus(); }
+  $('confirm-no').onclick = cancelDelete;
+  $('confirm-delete').addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); cancelDelete(); } });
+  $('check-refresh').onclick = () => { if (acting) return; $('review').hidden = true; renderCleanup(); load(); };
   $('open-trash').onclick = () => settings({}, true);
   $('receipt-close').onclick = () => { if (acting) return; $('receipt').hidden = true; renderCleanup(); resize(); };
   $('optin-git').onchange = () => settings({gitHealth:$('optin-git').checked});

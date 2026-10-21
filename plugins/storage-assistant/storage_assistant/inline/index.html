@@ -32,13 +32,13 @@
 <p id="cleanup-status" role="status"></p>
 </section>
 <section id="review" class="panel" hidden aria-labelledby="review-title">
-<h2 id="review-title">Review</h2>
+<h2 id="review-title" tabindex="-1">Review</h2>
 <ul id="review-items"></ul>
 <ul id="review-skipped" class="quiet"></ul>
-<div class="actions"><button id="do-trash" type="button" class="primary"></button><button id="do-evict" type="button"></button><button id="do-delete" type="button" class="danger"></button><button id="review-back" type="button">Back</button></div>
+<div class="actions"><button id="do-trash" type="button" class="primary"></button><button id="do-evict" type="button"></button><button id="do-delete" type="button" class="danger"></button><button id="check-refresh" type="button" hidden>Refresh the map</button><button id="review-back" type="button">Back</button></div>
 <p id="review-status" role="status"></p>
 </section>
-<section id="confirm-delete" class="panel" hidden role="alertdialog" aria-labelledby="confirm-text">
+<section id="confirm-delete" class="panel" hidden role="alertdialog" aria-modal="true" aria-labelledby="confirm-text">
 <h2 id="confirm-text"></h2>
 <ul id="confirm-items"></ul>
 <p id="confirm-total"></p>
@@ -46,7 +46,7 @@
 <p id="confirm-status" role="status"></p>
 </section>
 <section id="receipt" class="panel" hidden aria-labelledby="receipt-title">
-<h2 id="receipt-title"></h2>
+<h2 id="receipt-title" tabindex="-1"></h2>
 <p id="receipt-summary"></p>
 <ul id="receipt-done"></ul>
 <h3 id="receipt-skipped-title" hidden>Left alone</h3><ul id="receipt-skipped" class="quiet"></ul>
