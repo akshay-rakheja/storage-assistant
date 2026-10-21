@@ -151,6 +151,16 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(self.opened, [f"{self.plugin.companion.url}/#pair={self.plugin.companion.pairing}"])
         self.assertNotIn(self.plugin.companion.pairing, json.dumps(result))
 
+    def test_slow_tool_call_does_not_block_other_requests(self):
+        lines = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                 {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "storage_choose_folder", "arguments": {}}},
+                 {"jsonrpc": "2.0", "id": 3, "method": "ping"}]
+        stdin = io.BytesIO(b"".join(json.dumps(l).encode() + b"\n" for l in lines))
+        stdout = io.StringIO()
+        serve(stdin, stdout, chooser=lambda: time.sleep(2) or None, opener=lambda url: True)
+        order = [json.loads(l)["id"] for l in stdout.getvalue().splitlines()]
+        self.assertEqual(order, [1, 3, 2])  # the ping is answered while the picker is still open
+
     def test_serve_loop_round_trips_json_lines(self):
         lines = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
                  {"jsonrpc": "2.0", "method": "notifications/initialized"},

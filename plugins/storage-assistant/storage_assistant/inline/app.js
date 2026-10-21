@@ -19,11 +19,11 @@
   };
   const label = n => typeof n.displayLabel === 'string' && n.displayLabel.length > 0 && n.displayLabel.length <= 1024;
   function notify(method, params) { if (!disposed) window.parent.postMessage({jsonrpc:'2.0',method,params}, '*'); }
-  function request(method, params) {
+  function request(method, params, wait=8000) {
     if (disposed || pending.size >= 8 || !ready && method !== 'ui/initialize') return Promise.reject(new Error('Bridge unavailable'));
     const id = nextId++;
     return new Promise((resolve,reject) => {
-      const timer = setTimeout(() => { pending.delete(id); reject(new Error('Host response timed out')); },8000);
+      const timer = setTimeout(() => { pending.delete(id); reject(new Error('Host response timed out')); },wait);
       pending.set(id,{resolve,reject,timer});
       window.parent.postMessage({jsonrpc:'2.0',id,method,params}, '*');
     });
@@ -68,7 +68,7 @@
     if (envelope?.ok === false || result?.isError) { fail(envelope?.error?.code); return false; }
     if (envelope?.data?.state === 'running' && !envelope.data.view) {
       const n = Number.isSafeInteger(envelope.data.observedEntries) ? envelope.data.observedEntries : 0;
-      if (!current) status(`Scanning… ${n.toLocaleString()} items so far. The map appears when the scan finishes.`);
+      if (!current) { status(`Scanning… ${n.toLocaleString()} entries so far. The map appears here when the scan finishes.`); follow(envelope.data.scanId); }
       return false;
     }
     const v = envelope?.data?.view;
@@ -78,6 +78,21 @@
     watermark=v.scanVersion; revision=v.viewRevision; current=v;
     selected=v.rows.find(r=>r.nodeId && v.selectionIds.includes(r.nodeId)) || v.within;
     render(); return true;
+  }
+  // Keep one progress view current: ask for status until the scan finishes, then render.
+  let following = null;
+  function follow(scanId) {
+    if (following === scanId || !ID.test(scanId || '') || !caps.serverTools) return;
+    following = scanId;
+    const tick = () => {
+      if (disposed || current || following !== scanId) return;
+      request('tools/call', {name:'storage_scan_status', arguments:{scanId}}, 60000)
+        .then(result => { if (disposed || current || following !== scanId) return;
+          if (result?.structuredContent?.data?.state === 'running') { accept(result); setTimeout(tick, 1500); }
+          else { following = null; if (accept(result)) { operation++; busy = false; } controls(); } })
+        .catch(() => { if (!disposed && following === scanId) setTimeout(tick, 5000); });
+    };
+    setTimeout(tick, 1000);
   }
   function element(tag,text) { const e=document.createElement(tag); if(text!==undefined)e.textContent=text; return e; }
   function button(text,action,pressed) { const b=element('button',text); b.type='button'; b.onclick=action; if(pressed!==undefined)b.setAttribute('aria-pressed',String(pressed)); return b; }

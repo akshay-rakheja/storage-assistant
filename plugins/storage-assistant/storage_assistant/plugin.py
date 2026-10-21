@@ -25,9 +25,12 @@ PLUGIN_INSTRUCTIONS = (
     "Use only storage tools; never use shell/file tools to scan, widen scope or clean up. "
     "1) Call storage_choose_folder with the folder the person names as path (for example ~/Downloads or ~/Desktop/Projects); "
     "omit path only if they did not say which folder, which shows a native picker. "
-    "2) storage_start_scan scans everything (including .git, node_modules and iCloud-only files; up to 15 minutes for huge folders) "
-    "and shows a treemap when done. If it returns state running, tell the person it is still scanning and call storage_scan_status "
-    "again until it finishes; each call waits up to about 50 seconds. Do not pass limits. "
+    "2) storage_start_scan scans everything (including .git, node_modules and iCloud-only files; very large folders can take "
+    "several minutes) and its result shows the person a live progress view that turns into the treemap by itself when done. "
+    "If it returns state running, tell the person it is scanning, then call storage_scan_status (each call waits up to ~25 s) "
+    "until the state is no longer running before answering. Never start a second scan for the same folder. Do not pass limits. "
+    "If the person asks about their whole laptop or home folder, explain that one folder is scanned at a time and suggest "
+    "~/Documents, ~/Downloads, ~/Desktop or a projects folder instead of opening the picker. "
     "3) The finished scan result already shows the person a treemap, so do NOT call storage_render_view after a scan. "
     "Answer using real names and paths from storage_query (largest_files, children, by_category; drill in with withinNodeId). "
     "Call storage_render_view only when the person asks to see a subfolder, the other size measure or file types. "
@@ -35,7 +38,7 @@ PLUGIN_INSTRUCTIONS = (
     "Categories and age never prove something is safe to delete; allocated estimates are not reclaimable bytes. "
     "There is no delete capability: suggest what to review, and the person decides in Finder.")
 PLUGIN_LIMITS = {"maxEntries": 1000000, "maxDepth": 128, "maxDurationMs": 900000}
-SCAN_WAIT = 50
+SCAN_WAIT = 25
 GAP_WORDS = {"cloud_placeholder": "iCloud-only items not downloaded (they use no local space)",
              "symlink": "links not followed", "excluded": "credential folders and keys skipped (.ssh, .aws, .env, keys)",
              "denied": "items macOS denied access to", "changed": "items that changed during the scan",
@@ -101,7 +104,7 @@ class PluginProtocol(Protocol):
                 # without relying on the model to call render_view.
                 if tool["name"] == "storage_render_view":
                     tool["description"] = RENDER_DESCRIPTION
-                if tool["name"] in ("storage_render_view", "storage_start_scan", "storage_scan_status"):
+                if tool["name"] in ("storage_render_view", "storage_start_scan"):
                     tool["_meta"] = {"ui": {"resourceUri": UI_URI}, "openai/outputTemplate": UI_URI}
                 if tool["name"] == "storage_start_scan":
                     # Scan size is the grant's; the model cannot shrink it to stale maxima.
@@ -231,21 +234,50 @@ class Plugin:
 
 
 def serve(stdin=None, stdout=None, **kwargs):
+    """Read JSON-RPC lines; tool calls run concurrently so a long scan wait never
+    blocks pings, UI clicks or other requests from the host."""
     stdin = stdin or sys.stdin.buffer
     stdout = stdout or sys.stdout
     plugin = Plugin(**kwargs)
+    write_lock = threading.Lock()
+    slots = threading.BoundedSemaphore(8)
+    workers = []
+
+    def reply(result):
+        if result is not None:
+            with write_lock:
+                print(json.dumps(result, ensure_ascii=True, separators=(",", ":")), file=stdout, flush=True)
+
+    def handle(request):
+        try:
+            reply(plugin.protocol.handle(request))
+        except Exception:
+            reply({"jsonrpc": "2.0", "id": request.get("id") if isinstance(request, dict) else None,
+                   "error": {"code": -32603, "message": "Internal error"}})
+        finally:
+            slots.release()
+
     try:
         while True:
             line = stdin.readline(32769)
             if not line:
                 break
+            if len(line) > 32768 or not line.endswith(b"\n"):
+                break
             try:
-                if len(line) > 32768 or not line.endswith(b"\n"):
-                    break
-                result = plugin.protocol.handle(json.loads(line))
+                request = json.loads(line)
             except Exception:
-                result = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Invalid JSON"}}
-            if result is not None:
-                print(json.dumps(result, ensure_ascii=True, separators=(",", ":")), file=stdout, flush=True)
+                reply({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Invalid JSON"}})
+                continue
+            if isinstance(request, dict) and request.get("method") == "tools/call" and "id" in request:
+                slots.acquire()
+                worker = threading.Thread(target=handle, args=(request,), daemon=True)
+                worker.start()
+                workers = [w for w in workers if w.is_alive()] + [worker]
+            else:
+                slots.acquire()
+                handle(request)
     finally:
+        for worker in workers:
+            worker.join(timeout=SCAN_WAIT + 5)
         plugin.close()

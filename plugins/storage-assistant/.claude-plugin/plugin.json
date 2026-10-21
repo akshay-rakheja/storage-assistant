@@ -1,6 +1,6 @@
 {
   "name": "storage-assistant",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Ask what's taking up space in a folder on your Mac and explore it as a treemap. Read-only: never opens or deletes files.",
   "author": {
     "name": "Akshay Rakheja"
