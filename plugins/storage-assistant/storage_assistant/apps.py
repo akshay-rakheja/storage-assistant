@@ -20,7 +20,7 @@ UI_META = {"ui": {"prefersBorder": True, "csp": {
 
 def resource_list():
     return {"resources": [{"uri": UI_URI, "name": "storage-treemap-v1",
-                           "description": "Read-only alias treemap and table; no local names or network access.",
+                           "description": "Treemap and table of the scanned folder; cleanup acts only on the person's click. No network access.",
                            "mimeType": UI_MIME, "_meta": UI_META}]}
 
 

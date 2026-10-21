@@ -13,7 +13,7 @@ from .server import Companion
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Read-only metadata companion. No background installation.")
+    parser = argparse.ArgumentParser(description="Local storage companion: read-only metadata scans; cleanup only on the person's click. No background installation.")
     parser.add_argument("mode", choices=["demo", "serve", "attach", "chatgpt-attach", "plugin"])
     parser.add_argument("--root", help="Folder deliberately chosen by the local human; never a model argument")
     # Next to the launcher that started us (repo root run.py in development).

@@ -351,3 +351,25 @@ class MetadataWordingTests(unittest.TestCase):
         for text in (codex["description"], mcpb["description"], mcpb["long_description"], picker.PROMPT):
             self.assertIn("unless you click", text)
         self.assertNotIn('"', picker.PROMPT)  # embedded in an AppleScript string literal
+
+    def test_model_facing_text_matches_click_only_cleanup(self):
+        """I1: the model is told scanning is read-only, files change only on the person's click, and it cannot act."""
+        from pathlib import Path as _Path
+        import storage_assistant
+        from storage_assistant import apps, plugin as plugin_module
+        root = _Path(__file__).resolve().parent.parent
+        skill = (root / "plugins/storage-assistant/skills/storage-inspection/SKILL.md").read_text()
+        instructions = plugin_module.PLUGIN_INSTRUCTIONS
+        for text in (instructions, skill):
+            lowered = text.lower()
+            for stale in ("storage is read-only", "there is no delete capability", "decides in finder",
+                          "no deletion capability", "read-only storage tools"):
+                self.assertNotIn(stale, lowered)
+            self.assertIn("only when the person clicks", lowered)
+            self.assertIn("storage_open_local_view", text)
+            self.assertIn("Free up space", text)
+            self.assertIn("cannot", lowered)
+        cli_source = (root / "plugins/storage-assistant/storage_assistant/__main__.py").read_text()
+        for doc in (storage_assistant.__doc__, cli_source, apps.resource_list()["resources"][0]["description"]):
+            for stale in ("No content or mutation API", "Read-only alias treemap", "Read-only metadata companion"):
+                self.assertNotIn(stale, doc)

@@ -23,7 +23,8 @@ from .policy import StorageError
 from .server import Companion
 
 PLUGIN_INSTRUCTIONS = (
-    "Storage is read-only: sizes, names and folder structure of ONE folder the human picks; never file contents. "
+    "Scanning is read-only: sizes, names and folder structure of ONE folder the human picks; never file contents. "
+    "Files change only when the person clicks a cleanup action in the view; you cannot perform cleanup actions. "
     "Use only storage tools; never use shell/file tools to scan, widen scope or clean up. "
     "1) Call storage_choose_folder with the folder the person names as path (for example ~/Downloads or ~/Desktop/Projects); "
     "omit path only if they did not say which folder, which shows a native picker. "
@@ -38,8 +39,11 @@ PLUGIN_INSTRUCTIONS = (
     "Call storage_render_view only when the person asks to see a subfolder, the other size measure or file types. "
     "Report sizes in MB/GB and describe coverage using the coverageSummary field (do not infer limits from the limits settings). "
     "Categories and age never prove something is safe to delete; allocated estimates are not reclaimable bytes. "
-    "There is no delete capability: suggest what to review, and the person decides in Finder. "
-    "When the person wants to free space, call storage_suggest_cleanup after a scan. Explain the top candidates and their reasons. You cannot delete, move or evict anything: the person reviews and clicks in the view. Never claim something was deleted unless they tell you or a receipt says so.")
+    "When the person wants to free space, call storage_suggest_cleanup after a scan and explain the top candidates and "
+    "their reasons; they review, tick and click Move to Trash, Delete permanently or Remove Download in the view. "
+    "You cannot delete, move or evict anything and must not use other tools to do it. If this host shows no inline view, "
+    "call storage_open_local_view and tell the person to click Free up space there to review and act. "
+    "Never claim something was deleted unless they tell you or a receipt says so.")
 PLUGIN_LIMITS = {"maxEntries": 1000000, "maxDepth": 128, "maxDurationMs": 900000}
 SCAN_WAIT = 25
 GAP_WORDS = {"cloud_placeholder": "iCloud-only items not downloaded (they use no local space)",
@@ -98,7 +102,7 @@ SCHEMAS = {name: schema for name, _, schema in PLUGIN_TOOLS}
 
 
 NO_VIEW = ("Cleanup actions run only from the person's click in a view, and this host has no inline view. "
-           "Call storage_open_local_view and ask the person to review and act there.")
+           "Call storage_open_local_view and ask the person to click Free up space there to review and act.")
 
 
 def _refuse_without_view():
