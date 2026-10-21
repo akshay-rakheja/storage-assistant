@@ -276,6 +276,25 @@ def _duplicates(scan, flaggable):
     return pairs
 
 
+def _keep_like_possible(scan, exact, flaggable):
+    """Re-pick each exact-duplicate group's kept copy with the same preference as `_duplicates`.
+
+    The hashing check keeps whichever copy sorts first by path; without this the two maps can
+    keep different copies and cancel each other out. Inconsistent maps (a kept copy that is also
+    mapped, or a file mapped to itself) are dropped rather than repaired.
+    """
+    bad = {n for dup, kept in exact.items() if dup == kept or kept in exact for n in (dup, kept)}
+    groups = {}
+    for dup, kept in exact.items():
+        if dup not in bad and kept not in bad:
+            groups.setdefault(kept, {kept}).add(dup)
+    chosen = {}
+    for members in groups.values():
+        ordered = sorted(members, key=lambda i: (_disposable(scan, i), i in flaggable, len(scan.rel[i]), scan.rel[i]))
+        chosen.update({extra: ordered[0] for extra in ordered[1:] if extra in flaggable})
+    return chosen
+
+
 def suggest(engine, scan_id, scan_version, within_node_id=None, *, now, spotlight,
             applications=("/Applications", "~/Applications"), opt_in=frozenset(), checks=None):
     checks = checks or Checks()
@@ -315,7 +334,8 @@ def suggest(engine, scan_id, scan_version, within_node_id=None, *, now, spotligh
         nodes[nid]["name"].lower().endswith(REDOWNLOADABLE) or int(nodes[nid]["rawLogicalBytes"]) >= MIN_UNTOUCHED)),
         key=lambda i: -int(nodes[i]["allocatedEstimateBytes"] or 0))[:SPOTLIGHT_MAX]
     meta = spotlight.metadata([scan.abs(nid) for nid in looked_up]) if looked_up else {}
-    possible = _duplicates(scan, {nid for nid in scope if free_file(nid)})
+    flaggable = {nid for nid in scope if free_file(nid)}
+    possible = _duplicates(scan, flaggable)
     exact = {}
     if "exactDuplicates" in opt_in:
         sizes = {}
@@ -323,7 +343,11 @@ def suggest(engine, scan_id, scan_version, within_node_id=None, *, now, spotligh
             if nodes[nid]["kind"] == "file" and int(nodes[nid]["rawLogicalBytes"]) >= MIN_DUPLICATE:
                 sizes.setdefault(nodes[nid]["rawLogicalBytes"], []).append(nid)
         same_size = [i for ids in sizes.values() if len(ids) > 1 for i in ids][:DUPLICATE_MAX_IDS]
-        exact = checks.exact_duplicates(engine, same_size) if same_size else {}
+        exact = _keep_like_possible(scan, checks.exact_duplicates(engine, same_size) if same_size else {}, flaggable)
+        # An exact match replaces the name-and-size guess for the same files, so the two
+        # maps never flag each other's kept copy.
+        matched = set(exact) | set(exact.values())
+        possible = {dup: kept for dup, kept in possible.items() if dup not in matched and kept not in matched}
 
     health_cache = {}
 

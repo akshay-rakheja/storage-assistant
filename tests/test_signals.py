@@ -460,6 +460,23 @@ class SignalTests(unittest.TestCase):
             self.assertFalse(any(c["preTicked"] for c in result["candidates"]))
             self.assertLessEqual(len(result["candidates"]), 1)
 
+    def test_exact_duplicate_keeps_the_same_copy_as_possible_duplicate(self):
+        # optin keeps the copy whose path sorts first ("photos-backup/" < "photos/"), while the
+        # possible-duplicate rule keeps the shorter path; they must agree or both reasons cancel out.
+        self.make("photos/IMG_0001.heic", 15 * MB, sparse=True)
+        self.make("photos-backup/IMG_0001.heic", 15 * MB, sparse=True)
+        self.age_dirs()
+        self.scan()
+        with self.plugin.engine.lock:
+            ids = {self.plugin.engine.relative_path(n): k for k, n in self.plugin.engine.scan["nodes"].items()}
+        short, backup = ids["photos/IMG_0001.heic"], ids["photos-backup/IMG_0001.heic"]
+        result = self.suggest(checks=FakeChecks(duplicates={short: backup}), opt_in=frozenset({"exactDuplicates"}))
+        found = self.by_path(result)
+        self.assertNotIn("photos/IMG_0001.heic", found)
+        item = found["photos-backup/IMG_0001.heic"]
+        self.assertEqual((item["tier"], item["preTicked"], item.get("keptNodeId")), ("safe", True, short))
+        self.assertEqual(item["reasons"][0], {"code": "exact_duplicate", "text": "Exact duplicate of photos/IMG_0001.heic"})
+
     def test_download_folder_with_link_not_suggested(self):
         self.make("plain.download/data.bin", 2 * MB)
         self.make("linked.download/data.bin", 2 * MB)
