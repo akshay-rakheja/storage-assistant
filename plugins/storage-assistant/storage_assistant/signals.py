@@ -390,11 +390,14 @@ def suggest(engine, scan_id, scan_version, within_node_id=None, *, now, spotligh
             up = nodes[up]["parentId"]
         return True
 
+    kept_of = {}  # duplicate -> kept copy; cleanup re-checks the kept copy before acting
     for nid in duplicate_of:
         if keeps(nid, exact.get(nid)):
             reason = ("safe", "exact_duplicate", "Exact duplicate of " + scan.rel[exact[nid]])
+            kept_of[nid] = exact[nid]
         elif keeps(nid, possible.get(nid)):
             reason = ("glance", "possible_duplicate", "Possible duplicate of " + scan.rel[possible[nid]])
+            kept_of[nid] = possible[nid]
         else:
             continue
         found = hits.setdefault(nid, [])
@@ -421,6 +424,8 @@ def suggest(engine, scan_id, scan_version, within_node_id=None, *, now, spotligh
                 "reasons": [{"code": code, "text": text} for _, code, text in found], "actions": actions,
                 "freesBytes": nodes[nid]["allocatedEstimateBytes"] or "0", "logicalBytes": nodes[nid]["logicalBytes"],
                 "modifiedAt": scan.newest[nid] / 1e9})
+            if nid in kept_of:
+                candidates[-1]["keptNodeId"] = kept_of[nid]
     candidates.sort(key=lambda c: (TIER_ORDER[c["tier"]], -int(c["freesBytes"]), c["path"]))
     total = lambda tier: str(sum(int(c["freesBytes"]) for c in candidates if c["tier"] == tier))
     return {"candidates": candidates, "totals": {"safeBytes": total("safe"), "glanceBytes": total("glance")}}

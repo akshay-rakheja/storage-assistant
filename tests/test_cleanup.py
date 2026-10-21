@@ -31,6 +31,12 @@ class FakeChecks:
         return {}
 
 
+class HashingChecks(FakeChecks):
+    def exact_duplicates(self, engine, node_ids):
+        from storage_assistant import optin
+        return optin.exact_duplicates(engine, node_ids)
+
+
 class CleanupTests(unittest.TestCase):
     def setUp(self):
         self.base = Path(tempfile.mkdtemp()).resolve()
@@ -469,6 +475,112 @@ class CleanupTests(unittest.TestCase):
         plan = self.preview(["p/node_modules"], "delete")
         self.assertEqual(self.skipped(plan), {"node_modules": "Not offered for this action"})
         os.unlink(self.root / "p/node_modules/escape")
+
+    # I2: an unexpected error while acting still returns a receipt
+
+    def test_unexpected_error_is_reported_and_others_continue(self):
+        self.executor = FakeExecutor(str(self.trash), fail={"a.crdownload": TypeError("ctypes said no")})
+        self.two_partials()
+        plan = self.preview(["a.crdownload", "b.part"])
+        receipt = self.cleanup.execute(plan["token"])
+        self.assertEqual([d["path"] for d in receipt["done"]], ["b.part"])
+        self.assertEqual([(f["displayLabel"], f["reason"]) for f in receipt["failed"]],
+                         [("a.crdownload", "Something went wrong")])
+        self.assertIsNotNone(receipt["rescan"])
+
+    def test_unexpected_error_during_delete_is_partly_deleted(self):
+        self.node_modules()
+        self.executor = FakeExecutor(str(self.trash), fail={"node_modules": AttributeError("objc")})
+        self.scan()
+        self.suggest()
+        receipt = self.cleanup.execute(self.preview(["p/node_modules"], "delete")["token"])
+        self.assertEqual([(f["displayLabel"], f["reason"]) for f in receipt["failed"]],
+                         [("node_modules", "Partly deleted: Something went wrong")])
+        self.assertEqual(receipt["done"], [])
+
+    # I4: delete is for the Safe tier only, and a duplicate's kept copy must still be there
+
+    def test_delete_refuses_a_candidate_that_is_not_safe(self):
+        self.two_partials()
+        nid = self.node_id("a.crdownload")
+        key = (self.status["scanId"], self.status["scanVersion"])
+        self.cleanup.candidates[key][nid] = dict(self.cleanup.candidates[key][nid], tier="glance")
+        plan = self.preview(["a.crdownload"], "delete")
+        self.assertEqual(self.skipped(plan), {"a.crdownload": "Not offered for this action"})
+        self.assertIsNone(plan["token"])
+
+    def duplicates(self):
+        self.make("keep/clip.bin", 2 * MB)
+        self.make("copy/clip.bin", 2 * MB)
+        self.age_dirs()
+        self.scan()
+        self.cleanup.checks = HashingChecks()
+        self.cleanup.set_opt_in("exactDuplicates", True)
+        dup = next(c for c in self.suggest().values() if c["reasons"][0]["code"] == "exact_duplicate")
+        kept = next(p for p in ("keep/clip.bin", "copy/clip.bin") if p != dup["path"])
+        self.assertEqual(dup["keptNodeId"], self.node_id(kept))
+        return dup["path"], kept
+
+    def test_duplicate_delete_with_kept_copy_in_place(self):
+        dup, kept = self.duplicates()
+        receipt = self.cleanup.execute(self.preview([dup], "delete")["token"])
+        self.assertEqual([d["path"] for d in receipt["done"]], [dup])
+        self.assertTrue((self.root / kept).exists())
+
+    def test_duplicate_delete_skipped_when_kept_copy_is_gone(self):
+        dup, kept = self.duplicates()
+        plan = self.preview([dup], "delete")
+        os.rename(self.root / kept, self.base / "moved.bin")
+        receipt = self.cleanup.execute(plan["token"])
+        self.assertEqual(receipt["done"], [])
+        self.assertEqual(self.skipped(receipt), {"clip.bin": "Changed since you reviewed it"})
+        self.assertTrue((self.root / dup).exists())
+        self.assertEqual(self.executor.calls, [])
+
+    def test_duplicate_delete_skipped_when_kept_copy_is_replaced(self):
+        dup, kept = self.duplicates()
+        plan = self.preview([dup], "delete")
+        os.unlink(self.root / kept)
+        self.make(kept, 2 * MB)  # same name, size and time, another file
+        receipt = self.cleanup.execute(plan["token"])
+        self.assertEqual(self.skipped(receipt), {"clip.bin": "Changed since you reviewed it"})
+        self.assertTrue((self.root / dup).exists())
+
+    def test_duplicate_preview_skipped_when_kept_copy_changed(self):
+        dup, kept = self.duplicates()
+        os.unlink(self.root / kept)
+        plan = self.preview([dup], "delete")
+        self.assertEqual(self.skipped(plan), {"clip.bin": "Changed since you reviewed it"})
+
+    # I5: the path handed to Trash / Remove Download must still be the item just checked
+
+    def test_swapped_ancestor_before_trash_is_skipped(self):
+        self.make("sub/a.crdownload", 3000)
+        self.age_dirs()
+        self.scan()
+        self.suggest()
+        plan = self.preview(["sub/a.crdownload"])
+        real_lstat, swapped = os.lstat, []
+
+        def swap_then_lstat(path, *args, **kwargs):
+            if str(path) == str(self.root / "sub/a.crdownload") and not swapped:
+                # After revalidation by descriptor, the folder is renamed and another put in its place.
+                os.rename(self.root / "sub", self.root / "sub-old")
+                (self.root / "sub").mkdir()
+                (self.root / "sub/a.crdownload").write_bytes(b"other")
+                swapped.append(True)
+            return real_lstat(path, *args, **kwargs)
+
+        from unittest import mock
+        with mock.patch("storage_assistant.cleanup.os.lstat", side_effect=swap_then_lstat):
+            receipt = self.cleanup.execute(plan["token"])
+        self.assertTrue(swapped)
+        self.assertEqual(receipt["done"], [])
+        self.assertEqual(self.skipped(receipt), {"a.crdownload": "Changed since you reviewed it"})
+        self.assertEqual(receipt["failed"], [])
+        self.assertEqual(self.executor.calls, [])
+        self.assertTrue((self.root / "sub-old/a.crdownload").exists())
+        self.assertEqual((self.root / "sub/a.crdownload").read_bytes(), b"other")
 
     def test_set_opt_in(self):
         self.two_partials()

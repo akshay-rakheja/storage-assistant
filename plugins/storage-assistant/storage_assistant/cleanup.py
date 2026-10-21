@@ -41,6 +41,7 @@ TRASH_NOTE = "Space is freed when you empty the Trash."
 # Not in the plan's list: Remove Download returned but macOS still reports the file as downloaded.
 NOT_EVICTED = "macOS did not confirm the download was removed"
 PARTLY = "Partly deleted: "
+UNEXPECTED = "Something went wrong"
 # Scan-level stop reasons: the worker may have stopped (or been stopped) before seeing every folder's contents.
 _SCAN_STOPPED = ("time_limit", "entry_limit", "unavailable", "metadata_delayed", "cancelled")
 
@@ -158,6 +159,8 @@ class Cleanup:
                         raise _Skip(INCLUDED)
                     candidate, warnings = self._eligible(scan, node, newest, children, offered, action, now)
                     item = self._bind(scan, node, action)
+                    if action == "delete" and candidate and candidate.get("keptNodeId"):
+                        item["kept"] = self._bind_kept(scan, candidate["keptNodeId"])
                 except _Skip as skip:
                     skipped.append({"nodeId": nid, "displayLabel": label, "reason": skip.reason})
                     continue
@@ -238,6 +241,8 @@ class Cleanup:
                 or node["kind"] == "directory" and any(scan["gapCounts"].get(r) for r in _SCAN_STOPPED)):
             raise _Skip(NOT_OFFERED)
         candidate = offered.get(node["nodeId"])
+        if action == "delete" and (not candidate or candidate.get("tier") != "safe"):
+            raise _Skip(NOT_OFFERED)  # permanent deletion is for Safe-tier suggestions only
         if candidate and action in candidate["actions"]:
             return candidate, []
         if action != "trash" or node["protection"] == "protected":
@@ -256,6 +261,25 @@ class Cleanup:
                              policy_reason=NOT_OFFERED)
         expected["identity"] = identity(st)
         return expected
+
+    def _bind_kept(self, scan, kept_id):
+        """A duplicate is deleted only while the copy it duplicates is still there, unchanged."""
+        kept = scan["nodes"].get(kept_id)
+        if kept is None or kept["kind"] != "file":
+            raise _Skip(CHANGED)
+        try:
+            return self._bind(scan, kept, "trash")
+        except _Skip:
+            raise _Skip(CHANGED) from None
+
+    def _check_kept(self, item, times):
+        kept = item.get("kept")
+        if kept is None:
+            return
+        try:
+            self._with_item(kept, times, kept["identity"], lambda parent, name, st: None, check_walk=False)
+        except _Skip:
+            raise _Skip(CHANGED) from None
 
     # Revalidation
 
@@ -369,8 +393,14 @@ class Cleanup:
             try:
                 for item in record["items"]:
                     try:
-                        outcome = self._with_item(item, times, item["identity"],
-                                                  self._act(action, item, called), check_walk=action == "delete")
+                        try:
+                            self._check_kept(item, times)
+                            outcome = self._with_item(item, times, item["identity"],
+                                                      self._act(action, item, called), check_walk=action == "delete")
+                        except _Skip:
+                            raise
+                        except Exception:  # never lose the receipt: earlier items may already have been acted on
+                            raise _Skip(UNEXPECTED, failed=item["nodeId"] in called) from None
                     except _Skip as skip:
                         reason = PARTLY + skip.reason if skip.failed and action == "delete" else skip.reason
                         (failed if skip.failed else skipped).append(
@@ -395,6 +425,16 @@ class Cleanup:
         abs_path = os.path.join(self.engine.grant.path, item["relative"])
 
         def act(parent, name, st):
+            if action != "delete":
+                # Trash and Remove Download take a path: it must still lead to the item just checked
+                # by descriptor (an ancestor may have been swapped meanwhile).
+                try:
+                    now = os.lstat(abs_path)
+                except OSError:
+                    raise _Skip(CHANGED) from None
+                if ((now.st_dev, now.st_ino, stat.S_IFMT(now.st_mode))
+                        != (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode))):
+                    raise _Skip(CHANGED)
             called.append(item["nodeId"])
             try:
                 if action == "trash":
@@ -416,8 +456,12 @@ class Cleanup:
             except CleanupRefused as refused:  # "too_many" is raised before anything is removed
                 too_many = refused.reason == "too_many"
                 raise _Skip(TOO_MANY if too_many else CHANGED, failed=not too_many) from None
+            except _Skip:
+                raise
             except OSError as error:
                 raise _Skip(_os_reason(error), failed=True) from None
+            except Exception:  # e.g. a ctypes/Foundation error: report it, never lose the receipt
+                raise _Skip(UNEXPECTED, failed=True) from None
         return act
 
     @staticmethod
