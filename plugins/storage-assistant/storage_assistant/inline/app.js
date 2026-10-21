@@ -30,7 +30,7 @@
   }
   function status(text) { $('status').textContent = text; }
   function controls() {
-    for (const id of ['basis','aggregate','refresh','first','next','share']) $(id).disabled = closing || busy || !ready || !current || !caps.serverTools;
+    for (const id of ['basis','aggregate','refresh','first','next','share']) $(id).disabled = closing || busy || acting || !ready || !current || !caps.serverTools;
     $('next').disabled ||= !current?.nextCursor;
     $('share').disabled ||= !caps.updateModelContext?.structuredContent || current?.aggregate !== 'children';
   }
@@ -44,7 +44,7 @@
       INVALID_INPUT:'The page cursor or request is invalid. Refresh the view.',
       NOT_FOUND:'The item or resource is unavailable. Refresh the connection and current view.'
     };
-    current = null; selected = null; operation++; busy = false;
+    current = null; selected = null; operation++; busy = false; leaveCleanup(); $('receipt').hidden = true;
     $('view').hidden = true; $('rows').replaceChildren(); $('map').replaceChildren();
     if (shared || sharing) clearContext();
     status(messages[code] || 'The host returned an unsupported result. Refresh connection metadata and try again.'); controls();
@@ -71,11 +71,18 @@
       if (!current) { status(`Scanning… ${n.toLocaleString()} entries so far. The map appears here when the scan finishes.`); follow(envelope.data.scanId); }
       return false;
     }
-    const v = envelope?.data?.view;
+    const data = envelope?.data, v = data?.view, suggested = Array.isArray(data?.candidates);
+    // Suggestions without a view belong to the snapshot already shown.
+    if (suggested && !v && current) { candidates(data, current); render(); return true; }
     if (!valid(v)) { fail('BAD_RESULT'); return false; }
-    if (v.scanVersion<watermark || v.scanVersion===watermark && (current && v.scanId!==current.scanId || v.viewRevision<=revision)) return false;
+    if (v.scanVersion<watermark || v.scanVersion===watermark && (current && v.scanId!==current.scanId || v.viewRevision<=revision)) {
+      if (suggested && current && v.scanId===current.scanId && v.scanVersion===current.scanVersion) { candidates(data, current); render(); return true; }
+      return false;
+    }
     if (shared || sharing) clearContext();
     watermark=v.scanVersion; revision=v.viewRevision; current=v;
+    if (suggested) candidates(data, v);
+    else if (cleanup && (cleanup.scanId!==v.scanId || cleanup.scanVersion!==v.scanVersion)) leaveCleanup();
     selected=v.rows.find(r=>r.nodeId && v.selectionIds.includes(r.nodeId)) || v.within;
     render(); return true;
   }
@@ -84,12 +91,14 @@
   function follow(scanId) {
     if (following === scanId || !ID.test(scanId || '') || !caps.serverTools) return;
     following = scanId;
+    const live = () => !disposed && following === scanId && (!current || rescanning === scanId);
     const tick = () => {
-      if (disposed || current || following !== scanId) return;
+      if (!live()) return;
       request('tools/call', {name:'storage_scan_status', arguments:{scanId}}, 60000)
-        .then(result => { if (disposed || current || following !== scanId) return;
+        .then(result => { if (!live()) return;
           if (result?.structuredContent?.data?.state === 'running') { accept(result); setTimeout(tick, 1500); }
-          else { following = null; if (accept(result)) { operation++; busy = false; } controls(); } })
+          else { following = null; const ok = accept(result); if (ok) { operation++; busy = false; }
+            if (rescanning === scanId) { rescanning = null; afterRescan(ok); } controls(); } })
         .catch(() => { if (!disposed && following === scanId) setTimeout(tick, 5000); });
     };
     setTimeout(tick, 1000);
@@ -97,7 +106,7 @@
   function element(tag,text) { const e=document.createElement(tag); if(text!==undefined)e.textContent=text; return e; }
   function button(text,action,pressed) { const b=element('button',text); b.type='button'; b.onclick=action; if(pressed!==undefined)b.setAttribute('aria-pressed',String(pressed)); return b; }
   function choose(row) {
-    if(busy||closing)return;
+    if(busy||closing||acting)return;
     if(row.kind==='directory') load({withinNodeId:row.nodeId,aggregate:'children'},true);
     else { selected=row; if(shared)clearContext(); render(); }
   }
@@ -144,12 +153,15 @@
     ].filter(Boolean).join(' ');
     if(v.unknownAllocationCount)$('coverage').textContent+=` ${v.unknownAllocationCount.toLocaleString()} ${v.unknownAllocationCount===1?'file has':'files have'} unknown disk usage.`;
     $('caption').textContent=v.aggregate==='children'?'Items in this folder, largest first':'File types in this folder, largest first';
+    const cleanOn=!!cleanup&&cleanup.scanId===v.scanId&&cleanup.scanVersion===v.scanVersion;
     const largest=v.rows.reduce((m,r)=>r.bytes===null?m:Math.max(m,Number(r.bytes)),0)||1;
     $('rows').replaceChildren(...v.rows.map(r=>{
       const tr=element('tr'),name=element('td'),type=element('td',typeLabel(r)),size=element('td');
       name.className='name';type.className='type';size.className='size num';
       const label=element('span',r.nodeId?r.displayLabel:(CATS[r.displayLabel]||r.displayLabel));
-      if(r.nodeId){const b=button('',()=>choose(r),r.nodeId===selected?.nodeId||v.selectionIds.includes(r.nodeId));b.append(swatch(kindOf(r)),label);b.title=r.path||r.displayLabel;name.append(b);}
+      const c=cleanOn&&r.nodeId?cleanup.byId.get(r.nodeId):null;
+      if(r.nodeId){const b=button('',()=>choose(r),r.nodeId===selected?.nodeId||v.selectionIds.includes(r.nodeId));b.append(swatch(kindOf(r)),label);if(c)b.append(chip(c));b.title=r.path||r.displayLabel;
+        if(cleanOn){const pick=element('div');pick.className='pick';if(c){pick.append(checkbox(c,'in the clean-up'));tr.className='tier-'+c.tier;}else{const gap=element('i');gap.className='gap';pick.append(gap);}pick.append(b);name.append(pick);}else name.append(b);}
       else name.append(swatch(kindOf(r)),label);
       const meter=element('div'),bar=element('span'),fill=element('i');meter.className='meter';
       fill.style.width=r.bytes===null?'0':`${Math.max(1,Number(r.bytes)/largest*100)}%`;bar.append(fill);
@@ -159,6 +171,7 @@
     const positive=v.rows.filter(r=>r.bytes!==null&&BigInt(r.bytes)>0n);
     const box=$('map'),W=box.clientWidth||800,H=box.clientHeight||340;
     const tiles=squarify(positive,0,0,W,H);
+    const ticks=[];
     box.replaceChildren(...tiles.map(t=>{
       const kind=kindOf(t.row),pressed=t.row.nodeId?t.row.nodeId===selected?.nodeId||v.selectionIds.includes(t.row.nodeId):undefined;
       const b=button('',()=>t.row.nodeId&&choose(t.row),pressed);
@@ -168,8 +181,10 @@
       b.append(element('strong',title),element('span',bytes(t.row.bytes)));
       b.setAttribute('aria-label',`${title}, ${typeLabel(t.row)}, ${bytes(t.row.bytes)}${t.row.kind==='directory'?', open folder':''}`);
       b.title=`${t.row.path||title} (${bytes(t.row.bytes)})`;
+      const c=cleanOn&&t.row.nodeId?cleanup.byId.get(t.row.nodeId):null;
+      if(c){b.classList.add('cand','tier-'+c.tier);b.append(chip(c));b.setAttribute('aria-label',b.getAttribute('aria-label')+`, suggested: ${TIERS[c.tier]}`);if(t.w>=34&&t.h>=30)ticks.push(tickToggle(c,t,W,H));}
       if(!t.row.nodeId)b.disabled=true;return b;
-    }));
+    }),...ticks);
     const kinds=[...new Set(positive.map(kindOf))];
     $('legend').replaceChildren(...kinds.map(k=>{const li=element('li');li.append(swatch(k),document.createTextNode(k==='folder'?'Folder':(CATS[k]||k)));return li;}));
     $('first').hidden=!v.rows.length||!current.nextCursor&&v.matchingRows<=v.rows.length;
@@ -182,8 +197,226 @@
       'Neither number tells you exactly how much space deleting something would free (APFS clones and snapshots share space).',
       'Items that change during the scan, iCloud-only files, links and protected folders are listed above when skipped.'
     ].map(t=>element('li',t)));
-    controls();notify('ui/notifications/size-changed',{height:Math.min(document.documentElement.scrollHeight,1600)});
+    renderCleanup();controls();resize();
   }
+  // ---- Cleanup mode -------------------------------------------------------
+  // Candidates come from storage_suggest_cleanup. Only the person acts: ticks,
+  // Review… (preview per action, one-time tokens), then one execute per click.
+  // The executor revalidates everything; the view only shows and forwards ids.
+  const TIERS = {safe:'Safe to clear',glance:'Worth a glance',call:'Your call'};
+  const ACTIONS = ['trash','evict','delete'];
+  let cleanup = null, ticked = new Set(), seen = new Set(), previews = null, acting = false, resuggest = false, rescanning = null, deleting = null;
+  const short = (s,n) => typeof s === 'string' && s.length > 0 && s.length <= n;
+  function candidate(c) {
+    if (!c || !ID.test(c.nodeId) || !label(c) || !short(c.path,4096) || !TIERS[c.tier] || !validBytes(c.freesBytes) || c.freesBytes===null) return null;
+    const reasons = Array.isArray(c.reasons) ? c.reasons.filter(r=>short(r?.text,300)).slice(0,6).map(r=>r.text) : [];
+    const actions = Array.isArray(c.actions) ? ACTIONS.filter(a=>c.actions.includes(a)) : [];
+    return {nodeId:c.nodeId,displayLabel:c.displayLabel,path:c.path,tier:c.tier,preTicked:c.preTicked===true,reasons,actions,freesBytes:c.freesBytes};
+  }
+  function candidates(data, v) {
+    // Candidates belong to the scan of the view they came with.
+    const list = data.candidates.slice(0,500).map(candidate).filter(Boolean);
+    const fresh = !cleanup || cleanup.scanId!==v.scanId || cleanup.scanVersion!==v.scanVersion;
+    if (fresh) { ticked = new Set(); seen = new Set(); }
+    cleanup = {scanId:v.scanId,scanVersion:v.scanVersion,list,byId:new Map(list.map(c=>[c.nodeId,c]))};
+    for (const c of list) { if (!seen.has(c.nodeId) && c.preTicked) ticked.add(c.nodeId); seen.add(c.nodeId); }
+    for (const id of [...ticked]) if (!cleanup.byId.has(id)) ticked.delete(id);
+    previews = null; deleting = null; $('review').hidden = true; $('confirm-delete').hidden = true;
+    if (fresh) settings({});
+  }
+  function leaveCleanup() {
+    cleanup = null; ticked = new Set(); seen = new Set(); previews = null; deleting = null;
+    for (const id of ['cleanup','review','confirm-delete','tray']) $(id).hidden = true;
+  }
+  const sum = list => list.reduce((n,x)=>n+BigInt(x.freesBytes||'0'),0n).toString();
+  const items = n => `${n.toLocaleString()} ${n===1?'item':'items'}`;
+  function toggle(id, on) {
+    if (!cleanup?.byId.has(id) || acting) return;
+    on ? ticked.add(id) : ticked.delete(id);
+    if (!$('review').hidden) { review(); return; }
+    render();
+  }
+  function checkbox(c, where) {
+    const x = element('input'); x.type = 'checkbox'; x.checked = ticked.has(c.nodeId); x.disabled = acting;
+    x.setAttribute('aria-label', `Include ${c.displayLabel} (${TIERS[c.tier]}) ${where}`);
+    x.onchange = () => toggle(c.nodeId, x.checked); return x;
+  }
+  function chip(c) { const e = element('em', c.reasons[0] || TIERS[c.tier]); e.className = 'chip tier-'+c.tier; e.title = `${TIERS[c.tier]}: ${c.reasons.join('; ')}`; return e; }
+  function who(name, sub) { const d = element('span'); d.className = 'who'; d.append(element('b', name)); if (sub) d.append(element('small', sub)); return d; }
+  function tickToggle(c, t, W, H) {
+    // A separate control on top of the tile: clicking the tile itself still opens folders.
+    const b = button(ticked.has(c.nodeId) ? '✓' : '', () => toggle(c.nodeId, !ticked.has(c.nodeId)));
+    b.className = 'tick'; b.setAttribute('role','checkbox'); b.setAttribute('aria-checked', String(ticked.has(c.nodeId)));
+    b.setAttribute('aria-label', `Include ${c.displayLabel} (${TIERS[c.tier]})`); b.title = `${TIERS[c.tier]}: ${c.reasons.join('; ')}`; b.disabled = acting;
+    b.style.cssText = `left:calc(${(t.x+t.w)/W*100}% - 27px);top:calc(${t.y/H*100}% + 5px)`; return b;
+  }
+  function renderCleanup() {
+    const on = !!cleanup && cleanup.scanId===current?.scanId && cleanup.scanVersion===current?.scanVersion;
+    $('cleanup').hidden = !on;
+    if (!on) { $('tray').hidden = true; return; }
+    $('candidates').replaceChildren(...(cleanup.list.length ? cleanup.list.map(c => {
+      const li = element('li'); li.className = 'tier-'+c.tier;
+      li.append(checkbox(c,'in the clean-up'), who(c.displayLabel, `${TIERS[c.tier]} · ${c.path}`), chip(c), element('span', bytes(c.freesBytes)));
+      li.lastChild.className = 'amt'; return li;
+    }) : [element('li','Nothing to suggest in this folder.')]));
+    const chosen = cleanup.list.filter(c=>ticked.has(c.nodeId));
+    $('tray').hidden = !$('review').hidden || !$('confirm-delete').hidden || !$('receipt').hidden;
+    $('tray-text').textContent = `${items(chosen.length)} · frees about ${bytes(sum(chosen))} on this Mac`;
+    $('tray-review').disabled = acting || !chosen.length || !caps.serverTools;
+    for (const id of ['optin-git','optin-dup']) $(id).disabled = acting || !caps.serverTools;
+  }
+  async function call(name, args, wait=30000) {
+    const result = await request('tools/call', {name, arguments:args}, wait);
+    const envelope = result?.structuredContent;
+    if (envelope?.ok !== true || result?.isError) {
+      const m = envelope?.error?.message;
+      throw new Error(short(m,300) ? m : 'The plugin could not do this. Review again.');
+    }
+    return envelope.data;
+  }
+  function busyCleanup(on) { acting = on; for (const id of ['do-trash','do-evict','do-delete','review-back','confirm-yes','confirm-no','open-trash','receipt-close']) $(id).disabled = on; controls(); }
+  async function review() {
+    if (!cleanup || acting || closing) return;
+    const v = current, chosen = cleanup.list.filter(c=>ticked.has(c.nodeId));
+    $('receipt').hidden = true; $('confirm-delete').hidden = true; $('review').hidden = false; previews = null;
+    $('review-status').textContent = chosen.length ? 'Checking each item again…' : 'Nothing is ticked.';
+    for (const a of ACTIONS) $('do-'+a).hidden = true;
+    renderReview(chosen, {}); renderCleanup(); resize();
+    if (!chosen.length) return;
+    busyCleanup(true);
+    const results = {};
+    try {
+      // Preview each action only for the ticked items that offer it.
+      await Promise.all(ACTIONS.map(async a => {
+        const ids = chosen.filter(c=>c.actions.includes(a)).map(c=>c.nodeId);
+        if (ids.length) results[a] = await call('storage_cleanup_preview', {scanId:v.scanId,scanVersion:v.scanVersion,nodeIds:ids,action:a});
+      }));
+      if (current !== v || $('review').hidden) return;
+      previews = results; $('review-status').textContent = '';
+    } catch (e) { $('review-status').textContent = e.message; }
+    finally { busyCleanup(false); }
+    renderReview(chosen, previews || {}); renderCleanup(); resize();
+  }
+  function plan(a) { const p = previews?.[a]; return p && ID.test(p.token||'') && Number.isSafeInteger(p.count) && p.count>0 && validBytes(p.freesBytes) ? p : null; }
+  function renderReview(chosen, results) {
+    const detail = new Map();
+    for (const a of ACTIONS) for (const i of (Array.isArray(results[a]?.items) ? results[a].items : [])) if (ID.test(i?.nodeId) && !detail.has(i.nodeId)) detail.set(i.nodeId, i);
+    $('review-items').replaceChildren(...chosen.map(c => {
+      const i = detail.get(c.nodeId), li = element('li'); li.className = 'tier-'+c.tier;
+      const why = (Array.isArray(i?.reasons) ? i.reasons.map(r=>r?.text ?? r) : c.reasons).filter(t=>short(t,300)).join('; ');
+      li.append(checkbox(c,'in this review'), who(c.displayLabel, `${c.path}${why ? ' · '+why : ''}`), element('span', bytes(validBytes(i?.freesBytes) && i.freesBytes ? i.freesBytes : c.freesBytes)));
+      li.lastChild.className = 'amt';
+      const warnings = Array.isArray(i?.warnings) ? i.warnings.filter(w=>short(typeof w==='string'?w:w?.text,300)).map(w=>typeof w==='string'?w:w.text) : [];
+      if (warnings.length) { const w = element('small', warnings.join('; ')); w.className = 'warn'; li.querySelector('.who').append(w); }
+      return li;
+    }));
+    const left = [], once = new Set();
+    for (const a of ACTIONS) for (const s of (Array.isArray(results[a]?.skipped) ? results[a].skipped : []))
+      if (label(s) && short(s.reason,300) && !once.has(s.displayLabel+s.reason)) { once.add(s.displayLabel+s.reason); left.push(element('li', `Left out: ${s.displayLabel}: ${s.reason}`)); }
+    $('review-skipped').replaceChildren(...left);
+    const t = plan('trash'), e = plan('evict'), d = plan('delete');
+    $('do-trash').hidden = !t; if (t) $('do-trash').textContent = t.count===1 ? 'Move 1 item to Trash' : `Move ${t.count} items to Trash`;
+    $('do-evict').hidden = !e; if (e) $('do-evict').textContent = e.count===1 ? 'Remove 1 download (keep in iCloud)' : `Remove ${e.count} downloads (keep in iCloud)`;
+    $('do-delete').hidden = !d; if (d) $('do-delete').textContent = `Delete permanently, free ${bytes(d.freesBytes)} now`;
+  }
+  function confirmDelete() {
+    const d = plan('delete'); if (!d || acting) return;
+    deleting = d; $('review').hidden = true; $('confirm-delete').hidden = false; $('confirm-status').textContent = '';
+    $('confirm-text').textContent = d.count===1 ? 'Delete 1 item permanently? This can\'t be undone.' : `Delete ${d.count} items permanently? This can't be undone.`;
+    $('confirm-items').replaceChildren(...d.items.filter(label).slice(0,500).map(i => { const li = element('li'); li.append(who(i.displayLabel, short(i.path,4096) ? i.path : '')); return li; }));
+    $('confirm-total').textContent = `Frees about ${bytes(d.freesBytes)} on this Mac right away.`;
+    renderCleanup(); resize();
+  }
+  async function execute(a) {
+    const p = a==='delete' ? deleting : plan(a);
+    if (!p || acting || closing) return;
+    // Each token is spent once: forget every plan before sending so a second click sends nothing.
+    previews = null; deleting = null; busyCleanup(true);
+    const where = a==='delete' ? 'confirm-status' : 'review-status';
+    $(where).textContent = a==='trash' ? 'Moving to the Trash…' : a==='evict' ? 'Removing downloads…' : 'Deleting…';
+    try {
+      const r = await call('storage_cleanup_execute', {token:p.token}, 300000);
+      receipt(r);
+    } catch (e) {
+      // Back to a review with no plan: the person ticks and reviews again for a fresh token.
+      $('confirm-delete').hidden = true; $('review').hidden = false;
+      renderReview(cleanup ? cleanup.list.filter(c=>ticked.has(c.nodeId)) : [], {});
+      $('review-status').textContent = `${e.message} Nothing more was sent. Go back and review again; Refresh shows the current state.`;
+    }
+    finally { busyCleanup(false); renderCleanup(); resize(); }
+  }
+  function outcomes(list, title, box) {
+    const rows = (Array.isArray(list) ? list : []).filter(x=>label(x)&&short(x.reason,300)).slice(0,500);
+    $(title).hidden = !rows.length; $(box).replaceChildren(...rows.map(x=>element('li', `${x.displayLabel}: ${x.reason}`)));
+  }
+  function receipt(r) {
+    const done = (Array.isArray(r?.done) ? r.done : []).filter(label).slice(0,500), a = r?.action;
+    for (const id of ['review','confirm-delete']) $(id).hidden = true;
+    $('receipt').hidden = false;
+    $('receipt-title').textContent = a==='trash' ? 'Moved to the Trash' : a==='evict' ? 'Downloads removed' : 'Deleted';
+    const est = validBytes(r?.freedEstimateBytes) && r.freedEstimateBytes ? bytes(r.freedEstimateBytes) : 'an unknown amount';
+    $('receipt-summary').textContent = done.length ? (a==='trash' ? `Moved ${items(done.length)} to the Trash (about ${est}).` : a==='evict' ? `Removed ${done.length===1?'1 download':done.length.toLocaleString()+' downloads'} from this Mac (about ${est}); they stay in iCloud.` : `Deleted ${items(done.length)} (about ${est}).`) : 'Nothing was changed.';
+    $('receipt-done').replaceChildren(...done.map(d => { const li = element('li'); li.append(who(d.displayLabel, short(d.path,4096)?d.path:''), element('span', validBytes(d.freesBytes)&&d.freesBytes?bytes(d.freesBytes):'')); li.lastChild.className = 'amt'; return li; }));
+    outcomes(r?.skipped, 'receipt-skipped-title', 'receipt-skipped');
+    outcomes(r?.failed, 'receipt-failed-title', 'receipt-failed');
+    const before = r?.freeSpaceBefore, after = r?.freeSpaceAfter, ok = Number.isSafeInteger(before) && Number.isSafeInteger(after) && before>=0 && after>=0;
+    const change = ok ? after-before : 0;
+    $('receipt-space').textContent = ok ? `Free space on this Mac: ${bytes(String(before))} before, ${bytes(String(after))} now (${change>=0?'+':'−'}${bytes(String(Math.abs(change)))}).` : 'The change in free space could not be measured.';
+    $('receipt-note').textContent = short(r?.trashNote,300) ? r.trashNote : '';
+    const trashed = a==='trash' && done.length > 0;
+    $('open-trash').hidden = !trashed; $('receipt-hint').hidden = !trashed;
+    if (r?.rescan?.started && ID.test(r.rescan.scanId||'')) {
+      $('receipt-status').textContent = 'Updating the map…'; resuggest = true; rescanning = r.rescan.scanId; following = null; follow(r.rescan.scanId);
+    } else $('receipt-status').textContent = done.length ? 'Refresh to update the map.' : '';
+  }
+  async function settings(change, openTrash=false) {
+    if (!caps.serverTools || acting) return;
+    const changing = Object.keys(change).length > 0, out = openTrash ? 'receipt-status' : 'cleanup-status';
+    const args = {optIn:change}; if (openTrash) args.openTrash = true;
+    let ok = false;
+    if (changing) busyCleanup(true);
+    try {
+      const data = await call('storage_cleanup_settings', args);
+      if (typeof data?.optIn?.gitHealth === 'boolean') $('optin-git').checked = data.optIn.gitHealth;
+      if (typeof data?.optIn?.exactDuplicates === 'boolean') $('optin-dup').checked = data.optIn.exactDuplicates;
+      if (openTrash) $(out).textContent = 'The Trash is open in Finder.';
+      ok = true;
+    } catch (e) {
+      $(out).textContent = e.message;
+      if ('gitHealth' in change) $('optin-git').checked = !change.gitHealth;
+      if ('exactDuplicates' in change) $('optin-dup').checked = !change.exactDuplicates;
+    } finally { if (changing) busyCleanup(false); }
+    if (changing && ok) await suggest();  // switching a check forgets earlier suggestions
+    renderCleanup();
+  }
+  function afterRescan(ok) {
+    $('receipt-status').textContent = ok ? 'The map now shows the folder after this change.' : 'Refresh to update the map.';
+    if (ok && resuggest) { resuggest = false; suggest(); }
+  }
+  async function suggest() {
+    // Suggestions are refreshed after an opt-in change or a rescan; the model sees nothing new.
+    const v = current; if (!v || !caps.serverTools || acting) return;
+    $('cleanup-status').textContent = 'Looking for suggestions…'; busyCleanup(true);
+    try {
+      const result = await request('tools/call', {name:'storage_suggest_cleanup', arguments:{scanId:v.scanId,scanVersion:v.scanVersion}}, 120000);
+      busyCleanup(false);
+      if (result?.structuredContent?.ok !== true) throw new Error(result?.structuredContent?.error?.message);
+      if (current === v || current?.scanId === v.scanId && current?.scanVersion === v.scanVersion) { accept(result); $('cleanup-status').textContent = ''; }
+    } catch (e) { $('cleanup-status').textContent = short(e?.message,300) ? e.message : 'Suggestions could not be refreshed.'; }
+    finally { busyCleanup(false); renderCleanup(); resize(); }
+  }
+  function resize() { notify('ui/notifications/size-changed',{height:Math.min(document.documentElement.scrollHeight,2400)}); }
+  $('tray-review').onclick = review;
+  $('review-back').onclick = () => { if (acting) return; previews = null; $('review').hidden = true; renderCleanup(); resize(); };
+  $('do-trash').onclick = () => execute('trash');
+  $('do-evict').onclick = () => execute('evict');
+  $('do-delete').onclick = confirmDelete;
+  $('confirm-yes').onclick = () => execute('delete');
+  $('confirm-no').onclick = () => { if (acting) return; deleting = null; $('confirm-delete').hidden = true; review(); };
+  $('open-trash').onclick = () => settings({}, true);
+  $('receipt-close').onclick = () => { if (acting) return; $('receipt').hidden = true; renderCleanup(); resize(); };
+  $('optin-git').onchange = () => settings({gitHealth:$('optin-git').checked});
+  $('optin-dup').onchange = () => settings({exactDuplicates:$('optin-dup').checked});
   function theme(context) {
     // Host context: light/dark theme plus optional standard CSS variables.
     if(!context||typeof context!=='object')return;
@@ -205,7 +438,7 @@
     return contextQueue;
   }
   async function load(overrides={},navigation=false) {
-    if(!current||busy||closing||!caps.serverTools)return;
+    if(!current||busy||closing||acting||!caps.serverTools)return;
     const token=++operation,v=current;busy=true;controls();status('Loading authoritative measurements…');
     const args={scanId:v.scanId,scanVersion:v.scanVersion,basis:v.basis,withinNodeId:v.within.nodeId,aggregate:v.aggregate,pageSize:30,...overrides};
     try {
@@ -237,7 +470,7 @@
     if(disposed)return;disposed=true;ready=false;operation++;
     for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error('View disposed'));}pending.clear();
     window.removeEventListener('message',receive);window.removeEventListener('pagehide',unload);
-    current=null;selected=null;$('view').hidden=true;$('rows').replaceChildren();$('map').replaceChildren();status(message);controls();
+    current=null;selected=null;leaveCleanup();$('view').hidden=true;$('rows').replaceChildren();$('map').replaceChildren();status(message);controls();
   }
   function unload() { dispose(contextMayRemain?UNREVOKED:CLOSED); }
   async function teardown(id) {

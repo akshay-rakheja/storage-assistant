@@ -95,6 +95,17 @@ class PluginTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "INVALID_INPUT")
 
+    def test_ui_bundle_has_cleanup_controls(self):
+        self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": UI})
+        html = self.rpc("resources/read", {"uri": UI_URI})["result"]["contents"][0]["text"]
+        for marker in ('id="tray"', 'id="review"', 'id="confirm-delete"', 'id="receipt"', 'id="optin-git"', 'id="optin-dup"',
+                       "Move ", " items to Trash", "Delete permanently", "This can't be undone.", "Open Trash",
+                       "Safe to clear", "Worth a glance", "Review…", "Use Put Back in Finder to restore"):
+            self.assertIn(marker, html)
+        self.assertNotIn("fetch(", html)
+        self.assertNotIn("http://", html)
+        self.assertNotIn("https://", html)
+
     def test_picker_flow_returns_names_paths_and_treemap(self):
         status = self.scanned(UI)
         self.assertEqual(status["state"], "partial")  # start_scan waited for the worker to finish
