@@ -13,7 +13,9 @@ import threading
 import time
 import webbrowser
 from .apps import UI_URI, call_apps, view
-from .contracts import obj, validate
+from . import executor
+from .cleanup import OPT_INS, Cleanup
+from .contracts import ID, VERSION, obj, validate
 from .engine import Engine
 from .mcp import Protocol, call
 from .picker import choose_folder
@@ -21,7 +23,8 @@ from .policy import StorageError
 from .server import Companion
 
 PLUGIN_INSTRUCTIONS = (
-    "Storage is read-only: sizes, names and folder structure of ONE folder the human picks; never file contents. "
+    "Scanning is read-only: sizes, names and folder structure of ONE folder the human picks; never file contents. "
+    "Files change only when the person clicks a cleanup action in the view; you cannot perform cleanup actions. "
     "Use only storage tools; never use shell/file tools to scan, widen scope or clean up. "
     "1) Call storage_choose_folder with the folder the person names as path (for example ~/Downloads or ~/Desktop/Projects); "
     "omit path only if they did not say which folder, which shows a native picker. "
@@ -36,7 +39,11 @@ PLUGIN_INSTRUCTIONS = (
     "Call storage_render_view only when the person asks to see a subfolder, the other size measure or file types. "
     "Report sizes in MB/GB and describe coverage using the coverageSummary field (do not infer limits from the limits settings). "
     "Categories and age never prove something is safe to delete; allocated estimates are not reclaimable bytes. "
-    "There is no delete capability: suggest what to review, and the person decides in Finder.")
+    "When the person wants to free space, call storage_suggest_cleanup after a scan and explain the top candidates and "
+    "their reasons; they review, tick and click Move to Trash, Delete permanently or Remove Download in the view. "
+    "You cannot delete, move or evict anything and must not use other tools to do it. If this host shows no inline view, "
+    "call storage_open_local_view and tell the person to click Free up space there to review and act. "
+    "Never claim something was deleted unless they tell you or a receipt says so.")
 PLUGIN_LIMITS = {"maxEntries": 1000000, "maxDepth": 128, "maxDurationMs": 900000}
 SCAN_WAIT = 25
 GAP_WORDS = {"cloud_placeholder": "iCloud-only items not downloaded (they use no local space)",
@@ -67,6 +74,8 @@ RENDER_DESCRIPTION = ("Show the person an interactive treemap and table of the s
                       "the other size measure or file types. "
                       "Use withinNodeId to open a subfolder; selectionIds highlights items you mention.")
 
+VIEW_ONLY = "View-only: called by the Storage Assistant view after the person clicks."
+
 PLUGIN_TOOLS = [
     ("storage_choose_folder", "Select the ONE folder to measure. Pass path when the person names a folder "
      "(absolute or starting with ~/, e.g. ~/Downloads). Omit path only if they did not name one; a native picker opens. "
@@ -74,8 +83,30 @@ PLUGIN_TOOLS = [
      obj({"path": {"type": "string", "maxLength": 1024}})),
     ("storage_open_local_view", "Open the full-size treemap in the person's web browser on this Mac. "
      "Use when they want a bigger view or the inline view is unavailable.", obj()),
+    ("storage_suggest_cleanup", "Suggest items worth reviewing for freeing space in the scanned folder, with evidence-based reasons "
+     "(read-only; nothing is changed). Shows the person the treemap in cleanup mode, where only they can act. Call after a scan; "
+     "use withinNodeId to focus on a subfolder.",
+     obj({"scanId": ID, "scanVersion": VERSION, "withinNodeId": ID}, ["scanId", "scanVersion"])),
+    ("storage_cleanup_preview", VIEW_ONLY + " Previews moving the selected items to the Trash, deleting them or evicting iCloud copies; "
+     "returns what would happen and a one-time token. Changes nothing.",
+     obj({"scanId": ID, "scanVersion": VERSION, "nodeIds": {"type": "array", "items": ID, "minItems": 1, "maxItems": 500},
+          "action": {"type": "string", "enum": ["trash", "delete", "evict"]}}, ["scanId", "scanVersion", "nodeIds", "action"])),
+    ("storage_cleanup_execute", VIEW_ONLY + " Carries out a previewed cleanup plan identified by its token and returns a receipt.",
+     obj({"token": ID}, ["token"])),
+    ("storage_cleanup_settings", VIEW_ONLY + " Switches optional cleanup checks on or off and can open the Trash in Finder.",
+     obj({"optIn": obj({"gitHealth": {"type": "boolean"}, "exactDuplicates": {"type": "boolean"}}),
+          "openTrash": {"type": "boolean"}}, ["optIn"])),
 ]
+APP_ONLY = {"storage_cleanup_preview", "storage_cleanup_execute", "storage_cleanup_settings"}
 SCHEMAS = {name: schema for name, _, schema in PLUGIN_TOOLS}
+
+
+NO_VIEW = ("Cleanup actions run only from the person's click in a view, and this host has no inline view. "
+           "Call storage_open_local_view and ask the person to click Free up space there to review and act.")
+
+
+def _refuse_without_view():
+    raise StorageError("UNSUPPORTED", NO_VIEW)
 
 
 def envelope(fn):
@@ -95,8 +126,17 @@ class PluginProtocol(Protocol):
         if response and isinstance(request, dict) and request.get("method") == "tools/list" and "result" in response:
             extra = []
             for name, description, schema in PLUGIN_TOOLS:
-                extra.append({"name": name, "description": description, "inputSchema": schema,
-                              "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}})
+                changes = name in APP_ONLY
+                if changes and not self.ui_supported:
+                    # No MCP Apps view to click: the action tools do not exist for this client.
+                    continue
+                entry = {"name": name, "description": description, "inputSchema": schema,
+                         "annotations": {"readOnlyHint": not changes, "destructiveHint": changes, "openWorldHint": False}}
+                if changes:
+                    entry["_meta"] = {"ui": {"visibility": ["app"]}}
+                elif name == "storage_suggest_cleanup":
+                    entry["_meta"] = {"ui": {"resourceUri": UI_URI}, "openai/outputTemplate": UI_URI}
+                extra.append(entry)
             tools = extra + response["result"]["tools"]
             for tool in tools:
                 # Advertise the UI to every host: ones without MCP Apps ignore _meta.
@@ -124,7 +164,8 @@ class PluginProtocol(Protocol):
 class Plugin:
     def __init__(self, chooser=choose_folder, opener=webbrowser.open):
         self.engine = Engine(share_names=True, limits=PLUGIN_LIMITS, full_coverage=True)
-        self.companion = Companion(self.engine)
+        self.cleanup = Cleanup(self.engine, executor.Executor())
+        self.companion = Companion(self.engine, cleanup=self.cleanup)
         self.chooser = chooser
         self.opener = opener
         self.thread = threading.Thread(target=self.companion.serve_forever, kwargs={"poll_interval": .1}, daemon=True)
@@ -141,6 +182,12 @@ class Plugin:
         return result
 
     def _invoke(self, name, args):
+        if name in APP_ONLY and not self.protocol.ui_supported:
+            # Only an MCP Apps view (the person's click) may reach the action tools; other hosts use the paired
+            # local view, which calls the executor directly and never goes through MCP.
+            return envelope(_refuse_without_view)
+        if name.startswith("storage_cleanup_") or name == "storage_suggest_cleanup":
+            return envelope(lambda: self.cleanup_tool(name, args))
         if name in SCHEMAS:
             def run():
                 if name == "storage_choose_folder":
@@ -175,6 +222,27 @@ class Plugin:
                 result["content"] = [{"type": "text", "text": json.dumps(result["structuredContent"], ensure_ascii=True)}]
             return result
         return call(self.engine, name, args, self.companion.url)
+
+    def cleanup_tool(self, name, args):
+        validate(args, SCHEMAS[name])
+        if name == "storage_suggest_cleanup":
+            data = self.cleanup.suggest(args["scanId"], args["scanVersion"], args.get("withinNodeId"))
+            try:
+                data["view"] = view(self.engine, {"scanId": args["scanId"], "scanVersion": args["scanVersion"],
+                                                  "basis": "logical"})["view"]
+            except StorageError:
+                pass
+            return data
+        if name == "storage_cleanup_preview":
+            return self.cleanup.preview(args["scanId"], args["scanVersion"], args["nodeIds"], args["action"])
+        if name == "storage_cleanup_execute":
+            return self.cleanup.execute(args["token"])
+        for key, enabled in args["optIn"].items():
+            self.cleanup.set_opt_in(key, enabled)
+        if args.get("openTrash"):
+            self.cleanup.open_trash()
+        with self.cleanup.lock:
+            return {"optIn": {n: n in self.cleanup.opt_in for n in OPT_INS}}
 
     def with_view(self, result):
         """Attach the root treemap view to a finished scan result for MCP Apps hosts."""

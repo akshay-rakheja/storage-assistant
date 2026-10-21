@@ -9,13 +9,31 @@ import secrets
 import stat
 import threading
 import time
+from .cleanup import OPT_INS
 from .contracts import QUERY, validate
 from .engine import Engine
+from . import macos
 from .mcp import call
 from .policy import StorageError
 
 ASSETS = Path(__file__).parent / "web"
 CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+
+
+_ID = lambda v: isinstance(v, str) and 0 < len(v) <= 64
+_VERSION = lambda v: type(v) is int
+_BOOL = lambda v: isinstance(v, bool)
+_SCAN = {"scanId": _ID, "scanVersion": _VERSION}
+# route -> (allowed fields with checks, required fields); Cleanup re-validates everything it uses.
+CLEANUP_ROUTES = {
+    "suggest": (dict(_SCAN, withinNodeId=_ID), ("scanId", "scanVersion")),
+    "preview": (dict(_SCAN, nodeIds=lambda v: isinstance(v, list), action=lambda v: isinstance(v, str)),
+                ("scanId", "scanVersion", "nodeIds", "action")),
+    "execute": ({"token": lambda v: isinstance(v, str)}, ("token",)),
+    "settings": ({"optIn": lambda v: isinstance(v, dict) and set(v) <= set(OPT_INS) and all(map(_BOOL, v.values())),
+                  "openTrash": _BOOL}, ("optIn",)),
+    "reveal": (dict(_SCAN, nodeId=_ID, quickLook=_BOOL), ("scanId", "scanVersion", "nodeId", "quickLook")),
+}
 
 
 def secret_matches(value, expected):
@@ -24,8 +42,10 @@ def secret_matches(value, expected):
 
 class Companion(ThreadingHTTPServer):
     daemon_threads = True
-    def __init__(self, engine=None, synthetic_grant_id=None):
+    def __init__(self, engine=None, synthetic_grant_id=None, cleanup=None):
         self.engine = engine or Engine()
+        # The plugin's cleanup service; None in serve/demo modes, where the cleanup routes are absent.
+        self.cleanup = cleanup
         # Only the demo launcher supplies its freshly generated fixture grant.
         # This immutable binding is checked in the trusted local executor, not
         # in the descriptor, widget, model arguments or tunnel caller metadata.
@@ -56,6 +76,10 @@ class Companion(ThreadingHTTPServer):
             super().process_request_thread(request, client_address)
         finally:
             self.slots.release()
+
+    @staticmethod
+    def reveal(path, quick_look):
+        macos.reveal(path, quick_look)
 
     def descriptor(self):
         return {"url": self.url, "secret": self.secret, "pid": os.getpid()}
@@ -184,6 +208,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self.paired():
             self.respond(401, {"error": "Pair this browser using the local terminal code."})
             return
+        if self.path.startswith("/api/cleanup/"):
+            self.cleanup_route(args)
+            return
         try:
             engine = self.server.engine
             if self.path == "/api/state" and not args:
@@ -203,6 +230,43 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(400, {"error": exc.message, "code": exc.code})
         except Exception:
             self.respond(400, {"error": "Request failed without changing permissions."})
+
+    def cleanup_route(self, args):
+        """Paired cleanup routes: the person's clicks in this view are the only way to reach execute."""
+        cleanup = self.server.cleanup
+        route = self.path[len("/api/cleanup/"):]
+        if cleanup is None or route not in CLEANUP_ROUTES:
+            self.respond(404, {"error": "Not found."})
+            return
+        try:
+            fields, required = CLEANUP_ROUTES[route]
+            if not set(required) <= set(args) <= set(fields) or not all(check(args[k]) for k, check in fields.items() if k in args):
+                raise StorageError("INVALID_INPUT", "Invalid cleanup request.")
+            if route == "suggest":
+                result = cleanup.suggest(args["scanId"], args["scanVersion"], args.get("withinNodeId"))
+            elif route == "preview":
+                result = cleanup.preview(args["scanId"], args["scanVersion"], args["nodeIds"], args["action"])
+            elif route == "execute":
+                result = cleanup.execute(args["token"])
+            elif route == "settings":
+                for name, enabled in args["optIn"].items():
+                    cleanup.set_opt_in(name, enabled)
+                if args.get("openTrash"):
+                    cleanup.open_trash()
+                with cleanup.lock:
+                    result = {"optIn": {n: n in cleanup.opt_in for n in OPT_INS}}
+            else:
+                path = cleanup.locate(args["scanId"], args["scanVersion"], args["nodeId"])
+                try:
+                    self.server.reveal(path, args["quickLook"])
+                except (OSError, ValueError):
+                    raise StorageError("UNAVAILABLE", "Could not open Quick Look." if args["quickLook"] else "Could not show it in Finder.") from None
+                result = {"shown": True}
+            self.respond(200, {"ok": True, "data": result})
+        except StorageError as exc:
+            self.respond(400, {"ok": False, "error": exc.message, "code": exc.code})
+        except Exception:
+            self.respond(400, {"ok": False, "error": "The request failed. Refresh the map to see the current state.", "code": "UNAVAILABLE"})
 
     def do_OPTIONS(self):
         self.respond(405, {"error": "Cross-origin requests are unavailable."})

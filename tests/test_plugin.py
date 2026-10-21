@@ -1,5 +1,6 @@
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -13,6 +14,9 @@ from storage_assistant.policy import opaque
 
 ROOT = Path(__file__).resolve().parent.parent
 UI = {"extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}}}
+
+
+VIEW_ONLY = ("storage_cleanup_preview", "storage_cleanup_execute", "storage_cleanup_settings")
 
 
 class PluginTests(unittest.TestCase):
@@ -54,7 +58,7 @@ class PluginTests(unittest.TestCase):
         self.assertFalse(tools["storage_choose_folder"]["inputSchema"]["additionalProperties"])
         self.assertEqual(tools["storage_render_view"]["_meta"]["ui"]["resourceUri"], UI_URI)
         self.assertEqual(tools["storage_start_scan"]["_meta"]["ui"]["resourceUri"], UI_URI)
-        self.assertTrue(all(t["annotations"]["readOnlyHint"] for t in tools.values()))
+        self.assertTrue(all(t["annotations"]["readOnlyHint"] for n, t in tools.items() if n not in VIEW_ONLY))
         self.assertEqual(self.rpc("resources/list")["result"]["resources"][0]["uri"], UI_URI)
         plain = Plugin(chooser=lambda: None, opener=lambda url: True)
         try:
@@ -64,6 +68,78 @@ class PluginTests(unittest.TestCase):
             self.assertEqual(render["_meta"]["ui"]["resourceUri"], UI_URI)
         finally:
             plain.close()
+
+    def test_cleanup_tools_listed_with_visibility(self):
+        self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": UI})
+        tools = {t["name"]: t for t in self.rpc("tools/list")["result"]["tools"]}
+        for name in VIEW_ONLY:
+            self.assertEqual(tools[name]["_meta"], {"ui": {"visibility": ["app"]}})
+            self.assertTrue(tools[name]["description"].startswith(
+                "View-only: called by the Storage Assistant view after the person clicks."))
+            self.assertFalse(tools[name]["annotations"]["readOnlyHint"])
+        suggest = tools["storage_suggest_cleanup"]
+        self.assertNotIn("visibility", suggest["_meta"]["ui"])
+        self.assertEqual(suggest["_meta"]["ui"]["resourceUri"], UI_URI)
+        self.assertTrue(suggest["annotations"]["readOnlyHint"])
+
+    def test_non_apps_client_gets_no_action_tools(self):
+        """C1: without MCP Apps there is no view to click, so the model never sees or reaches the action tools."""
+        for capabilities in ({}, {"extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html"]}}},
+                             {"extensions": {"io.modelcontextprotocol/ui": {}}}):
+            with self.subTest(capabilities=capabilities):
+                plain = Plugin(chooser=lambda: self.choice, opener=lambda url: True)
+                try:
+                    plain.protocol.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                           "params": {"protocolVersion": "2025-11-25", "capabilities": capabilities}})
+                    listed = {t["name"] for t in plain.protocol.handle(
+                        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]}
+                    self.assertFalse(listed & set(VIEW_ONLY), listed)
+                    self.assertIn("storage_suggest_cleanup", listed)
+                    self.assertIn("storage_open_local_view", listed)
+                    for name, args in (("storage_cleanup_preview", {"scanId": "ab" * 16, "scanVersion": 1,
+                                                                    "nodeIds": ["cd" * 16], "action": "delete"}),
+                                       ("storage_cleanup_execute", {"token": "ab" * 16}),
+                                       ("storage_cleanup_settings", {"optIn": {"gitHealth": True}, "openTrash": True})):
+                        body = plain.protocol.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                                      "params": {"name": name, "arguments": args}})["result"]["structuredContent"]
+                        self.assertFalse(body["ok"])
+                        self.assertEqual(body["error"]["code"], "UNSUPPORTED")
+                        self.assertIn("storage_open_local_view", body["error"]["message"])
+                    self.assertEqual(plain.cleanup.opt_in, set())  # the refused settings call changed nothing
+                finally:
+                    plain.close()
+
+    def test_apps_client_can_call_action_tools(self):
+        self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": UI})
+        listed = {t["name"] for t in self.rpc("tools/list")["result"]["tools"]}
+        self.assertTrue(set(VIEW_ONLY) <= listed)
+        body = self.tool("storage_cleanup_settings", {"optIn": {"gitHealth": False}})
+        self.assertTrue(body["ok"], body)
+
+    def test_suggest_returns_candidates_and_view(self):
+        status = self.scanned(UI)
+        result = self.tool("storage_suggest_cleanup", {"scanId": status["scanId"], "scanVersion": status["scanVersion"]})
+        self.assertTrue(result["ok"], result)
+        self.assertIn("candidates", result["data"])
+        self.assertIn("view", result["data"])
+
+    def test_execute_via_protocol_requires_preview_token(self):
+        self.scanned(UI)
+        result = self.tool("storage_cleanup_execute", {"token": "ab" * 16})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "INVALID_INPUT")
+
+    def test_ui_bundle_has_cleanup_controls(self):
+        self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": UI})
+        html = self.rpc("resources/read", {"uri": UI_URI})["result"]["contents"][0]["text"]
+        for marker in ('id="tray"', 'id="review"', 'id="confirm-delete"', 'id="receipt"', 'id="optin-git"', 'id="optin-dup"',
+                       "Move ", " items to Trash", "Delete permanently", "This can't be undone.", "Open Trash",
+                       "Safe to clear", "Worth a glance", "Review…", "Use Put Back in Finder to restore",
+                       'aria-modal="true"', "The result is unknown", "Refresh the map"):
+            self.assertIn(marker, html)
+        self.assertNotIn("fetch(", html)
+        self.assertNotIn("http://", html)
+        self.assertNotIn("https://", html)
 
     def test_picker_flow_returns_names_paths_and_treemap(self):
         status = self.scanned(UI)
@@ -87,6 +163,28 @@ class PluginTests(unittest.TestCase):
         # Relative paths only: the absolute location of the chosen folder is never returned.
         self.assertNotIn(self.temp.name, json.dumps(view))
         self.assertEqual(self.plugin.engine.view["selectionIds"], [top[0]["nodeId"]])
+
+    def _scan_rows(self):
+        status = self.scanned()
+        rows = self.tool("storage_query", {"scanId": status["scanId"], "scanVersion": status["scanVersion"],
+                                           "basis": "logical", "aggregate": "largest_files", "pageSize": 100})["data"]["rows"]
+        return status, rows
+
+    def test_small_installer_stays_selectable(self):
+        for name, size in (("Documents/setup.dmg", 10_000), ("Documents/x.crdownload", 5_000)):
+            (self.fixture / name).write_bytes(b"\0" * size)
+        _, rows = self._scan_rows()
+        labels = [r["displayLabel"] for r in rows]
+        self.assertIn("setup.dmg", labels)
+        self.assertIn("x.crdownload", labels)
+        for r in rows:
+            if r["displayLabel"] in ("setup.dmg", "x.crdownload"):
+                self.assertNotIn("groupedFiles", r)
+
+    def test_nodes_keep_modified_time(self):
+        _, rows = self._scan_rows()
+        row = next(r for r in rows if r["displayLabel"] == "sparse.mov")
+        self.assertAlmostEqual(row["modifiedAt"], os.stat(self.fixture / "Films/sparse.mov").st_mtime, delta=2)
 
     def test_plugin_grant_uses_larger_limits(self):
         self.rpc("initialize")
@@ -230,3 +328,85 @@ class GroupingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MetadataWordingTests(unittest.TestCase):
+    """Shipped descriptions match the product: it clears space, but only on the person's click."""
+
+    def test_descriptions_no_longer_claim_read_only(self):
+        import json as _json
+        from pathlib import Path as _Path
+        from storage_assistant import picker
+        root = _Path(__file__).resolve().parent.parent
+        codex = _json.loads((root / "plugins/storage-assistant/plugin.json").read_text())
+        claude = _json.loads((root / "plugins/storage-assistant/.claude-plugin/plugin.json").read_text())
+        mcpb = _json.loads((root / "packaging/mcpb/manifest.json").read_text())
+        self.assertEqual(codex["description"], claude["description"])
+        texts = [codex["description"], codex["extensions"]["com.openai"]["interface"]["shortDescription"],
+                 mcpb["description"], mcpb["long_description"], picker.PROMPT]
+        for text in texts:
+            lowered = text.lower()
+            for stale in ("read-only", "read only", "nothing is changed", "never opens or deletes"):
+                self.assertNotIn(stale, lowered, text)
+        for text in (codex["description"], mcpb["description"], mcpb["long_description"], picker.PROMPT):
+            self.assertIn("unless you click", text)
+        self.assertNotIn('"', picker.PROMPT)  # embedded in an AppleScript string literal
+
+    def test_model_facing_text_matches_click_only_cleanup(self):
+        """I1: the model is told scanning is read-only, files change only on the person's click, and it cannot act."""
+        from pathlib import Path as _Path
+        import storage_assistant
+        from storage_assistant import apps, plugin as plugin_module
+        root = _Path(__file__).resolve().parent.parent
+        skill = (root / "plugins/storage-assistant/skills/storage-inspection/SKILL.md").read_text()
+        instructions = plugin_module.PLUGIN_INSTRUCTIONS
+        for text in (instructions, skill):
+            lowered = text.lower()
+            for stale in ("storage is read-only", "there is no delete capability", "decides in finder",
+                          "no deletion capability", "read-only storage tools"):
+                self.assertNotIn(stale, lowered)
+            self.assertIn("only when the person clicks", lowered)
+            self.assertIn("storage_open_local_view", text)
+            self.assertIn("Free up space", text)
+            self.assertIn("cannot", lowered)
+        cli_source = (root / "plugins/storage-assistant/storage_assistant/__main__.py").read_text()
+        for doc in (storage_assistant.__doc__, cli_source, apps.resource_list()["resources"][0]["description"]):
+            for stale in ("No content or mutation API", "Read-only alias treemap", "Read-only metadata companion"):
+                self.assertNotIn(stale, doc)
+
+
+class ViewReceiptTests(unittest.TestCase):
+    """I2 and I6 in both views (source-level: the views have no JS test harness)."""
+    PKG = ROOT / "plugins/storage-assistant/storage_assistant"
+    REFUSALS = "['INVALID_INPUT','STALE_SCAN','SCOPE_EXPIRED','NOT_AUTHORIZED','CONFLICT','UNSUPPORTED']"
+
+    def source(self, name):
+        return (self.PKG / name).read_text().replace(" ", "").replace('"', "'")
+
+    def function(self, text, header):
+        start = text.index(header)
+        depth, i = 0, text.index("{", start)
+        for j in range(i, len(text)):
+            depth += {"{": 1, "}": -1}.get(text[j], 0)
+            if depth == 0:
+                return text[start:j + 1]
+        self.fail(header)
+
+    def test_only_pre_action_codes_count_as_refused(self):
+        for name in ("inline/app.js", "web/app.js"):
+            with self.subTest(view=name):
+                text = self.source(name)
+                self.assertIn("REFUSALS=newSet(" + self.REFUSALS + ")", text)
+                self.assertIn("refused:REFUSALS.has(", text)
+                self.assertNotIn("{refused:true}", text)
+
+    def test_failed_rescan_keeps_the_receipt(self):
+        inline = self.source("inline/app.js")
+        fail = self.function(inline, "functionfail(code)")
+        self.assertNotIn("$('receipt').hidden=true", fail)
+        self.assertIn("receipt-only", fail)
+        web = self.source("web/app.js")
+        leave = self.function(web, "functionleaveCleanup()")
+        self.assertNotIn("'receipt'", leave)
+        css = (self.PKG / "inline/style.css").read_text()
+        self.assertIn("#view.receipt-only>:not(#receipt){display:none}", css.replace(" ", ""))

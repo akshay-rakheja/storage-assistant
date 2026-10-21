@@ -21,7 +21,44 @@
 <thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col" class="num">Size</th></tr></thead><tbody id="rows"></tbody></table>
 <div class="pager"><button id="first" type="button">Back to the largest</button><button id="next" type="button">Show more</button><button id="share" type="button">Ask about the selected item</button></div>
 <p id="selection" role="status"></p>
+<section id="cleanup" hidden aria-labelledby="cleanup-title">
+<h2 id="cleanup-title">Suggestions</h2>
+<p class="hint">Ticked items are only changed after you review them and click. Labels describe evidence; check anything you are unsure about.</p>
+<ul id="candidates" aria-label="Suggested items"></ul>
+<fieldset class="optins"><legend>Optional checks</legend>
+<label><input type="checkbox" id="optin-git"> Check git repositories (pushed, nothing unsaved)</label>
+<label><input type="checkbox" id="optin-dup"> Find exact duplicates (compares file contents on this Mac)</label>
+</fieldset>
+<p id="cleanup-status" role="status"></p>
+</section>
+<section id="review" class="panel" hidden aria-labelledby="review-title">
+<h2 id="review-title" tabindex="-1">Review</h2>
+<ul id="review-items"></ul>
+<ul id="review-skipped" class="quiet"></ul>
+<div class="actions"><button id="do-trash" type="button" class="primary"></button><button id="do-evict" type="button"></button><button id="do-delete" type="button" class="danger"></button><button id="check-refresh" type="button" hidden>Refresh the map</button><button id="review-back" type="button">Back</button></div>
+<p id="review-status" role="status"></p>
+</section>
+<section id="confirm-delete" class="panel" hidden role="alertdialog" aria-modal="true" aria-labelledby="confirm-text">
+<h2 id="confirm-text"></h2>
+<ul id="confirm-items"></ul>
+<p id="confirm-total"></p>
+<div class="actions"><button id="confirm-yes" type="button" class="danger">Delete permanently</button><button id="confirm-no" type="button">Cancel</button></div>
+<p id="confirm-status" role="status"></p>
+</section>
+<section id="receipt" class="panel" hidden aria-labelledby="receipt-title">
+<h2 id="receipt-title" tabindex="-1"></h2>
+<p id="receipt-summary"></p>
+<ul id="receipt-done"></ul>
+<h3 id="receipt-skipped-title" hidden>Left alone</h3><ul id="receipt-skipped" class="quiet"></ul>
+<h3 id="receipt-failed-title" hidden>Didn't finish</h3><ul id="receipt-failed" class="quiet"></ul>
+<p id="receipt-space"></p>
+<p id="receipt-note"></p>
+<div class="actions"><button id="open-trash" type="button">Open Trash</button><button id="receipt-close" type="button">Done</button></div>
+<p id="receipt-hint" class="quiet">Use Put Back in Finder to restore</p>
+<p id="receipt-status" role="status"></p>
+</section>
+<div id="tray" hidden><span id="tray-text"></span><button id="tray-review" type="button" class="primary">Review…</button></div>
 <details><summary>About these numbers</summary>
-<p>Names, sizes and dates of the folder you chose. File contents are never opened and nothing is changed.</p>
+<p>Names, sizes and dates of the folder you chose. File contents are never opened; files change only when you click an action in the clean-up panel.</p>
 <ul id="caveats"></ul></details>
 </section></main><script>/* BUNDLED_SCRIPT */</script></body></html>
