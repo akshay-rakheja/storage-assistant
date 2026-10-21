@@ -32,7 +32,7 @@
   }
   function status(text) { $('status').textContent = text; }
   function controls() {
-    for (const id of ['basis','aggregate','refresh','first','next']) $(id).disabled = closing || busy || acting || !ready || !current || !caps.serverTools;
+    for (const id of ['basis','aggregate','refresh','first','next','suggest']) $(id).disabled = closing || busy || acting || !ready || !current || !caps.serverTools;
   }
   function fail(code) {
     const messages = {
@@ -276,7 +276,7 @@
   function renderCleanup() {
     const on = !!cleanup && cleanup.scanId===current?.scanId && cleanup.scanVersion===current?.scanVersion;
     // Shown until this snapshot has suggestions, so they never depend on the assistant asking for them.
-    $('suggest').hidden = on || !current || !caps.serverTools; $('suggest').disabled = acting || busy || closing;
+    $('suggest').hidden = on || !current || !caps.serverTools;
     if (on && !cleanup.list.length && !$('cleanup-status').textContent) $('cleanup-status').textContent = 'Nothing stands out to suggest here. Tick anything you want to clear.';
     const chosen = [...ticked].map(item).filter(Boolean);
     // The bar shows only once something is ticked, and steps aside while a review or receipt is open.

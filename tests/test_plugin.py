@@ -434,6 +434,11 @@ class ViewReceiptTests(unittest.TestCase):
                 self.assertIn("refused:REFUSALS.has(", text)
                 self.assertNotIn("{refused:true}", text)
 
+    def test_suggest_button_reenables_with_the_other_controls(self):
+        """A view load marks the view busy while it redraws; controls() must re-enable the button afterwards."""
+        controls = self.function(self.source("inline/app.js"), "functioncontrols()")
+        self.assertIn("'suggest'", controls)
+
     def test_failed_rescan_keeps_the_receipt(self):
         inline = self.source("inline/app.js")
         fail = self.function(inline, "functionfail(code)")
