@@ -148,11 +148,26 @@ class SignalTests(unittest.TestCase):
         (self.apps / "Ollama.app" / "Contents").mkdir(parents=True)
         self.age_dirs()
         self.scan()
-        found = self.by_path(self.suggest())
+        spotlight = FakeSpotlight({"Ollama.dmg": {"lastUsed": None, "whereFroms": ["https://ollama.com/download/Ollama.dmg"]}})
+        found = self.by_path(self.suggest(spotlight))
         c = found["Ollama.dmg"]
         self.assertEqual(c["tier"], "safe")
         self.assertIn({"code": "installed_app", "text": "Ollama is already installed"}, c["reasons"])
         self.assertNotIn("Unknown-1.2.dmg", found)
+
+    def test_installer_without_download_source_is_glance(self):
+        """I3(c): a .dmg/.pkg named like an installed app is Safe only with a WhereFroms entry."""
+        self.make("Ollama.dmg", 2 * MB)
+        self.make("Ollama-0.5.pkg", 2 * MB)
+        (self.apps / "Ollama.app" / "Contents").mkdir(parents=True)
+        self.age_dirs()
+        self.scan()
+        found = self.by_path(self.suggest())
+        for name in ("Ollama.dmg", "Ollama-0.5.pkg"):
+            self.assertEqual(found[name]["tier"], "glance", name)
+            self.assertFalse(found[name]["preTicked"])
+            self.assertNotIn("delete", found[name]["actions"])
+            self.assertIn({"code": "installed_app", "text": "Ollama is already installed"}, found[name]["reasons"])
 
     def test_redownloadable_from_spotlight(self):
         self.make("tool.zip", 2 * MB)
@@ -166,6 +181,53 @@ class SignalTests(unittest.TestCase):
         self.assertNotIn("secret", repr(c))
         self.assertNotIn("releases", repr(c))
         self.assertTrue(spotlight.calls and all(p.startswith(str(self.root)) for p in spotlight.calls[0]))
+
+    def test_redownloadable_only_from_public_release_hosts(self):
+        """I3(b): other hosts (mail, chat, transfer services, presigned links) cannot be fetched again."""
+        hosts = {"model.gguf": "https://cdn-lfs.huggingface.co/x/model.gguf?X-Amz-Signature=abc",
+                 "app.zip": "https://objects.githubusercontent.com/github-production-release-asset/1",
+                 "mail.zip": "https://mail.example.com/attachment?id=1",
+                 "transfer.zip": "https://download.wetransfer.com/eu2/abc",
+                 "apple.dmg": "https://download.developer.apple.com/Developer_Tools/x.dmg"}
+        for name in hosts:
+            self.make(name, 2 * MB)
+        self.age_dirs()
+        self.scan()
+        spotlight = FakeSpotlight({n: {"lastUsed": None, "whereFroms": [u]} for n, u in hosts.items()})
+        found = self.by_path(self.suggest(spotlight))
+        for name, host in (("model.gguf", "cdn-lfs.huggingface.co"), ("app.zip", "objects.githubusercontent.com")):
+            self.assertEqual(found[name]["tier"], "safe", name)
+            self.assertEqual(found[name]["reasons"],
+                             [{"code": "redownloadable", "text": f"Downloaded from {host}, can be fetched again"}])
+        for name, host in (("mail.zip", "mail.example.com"), ("transfer.zip", "download.wetransfer.com"),
+                           ("apple.dmg", "download.developer.apple.com")):
+            self.assertEqual(found[name]["tier"], "glance", name)
+            self.assertFalse(found[name]["preTicked"])
+            self.assertNotIn("delete", found[name]["actions"])
+            self.assertEqual(found[name]["reasons"], [{"code": "download_source", "text": f"Downloaded from {host}"}])
+
+    def test_rebuildable_folders_need_their_own_marker(self):
+        """I3(a): a rebuildable name counts only next to the marker of the tool that rebuilds it."""
+        layout = {"rust/Cargo.toml": "rust/target", "js/package.json": "js/target", "py/requirements.txt": "py/.venv",
+                  "py2/setup.py": "py2/venv", "pods/Podfile": "pods/Pods", "pods2/package.json": "pods2/Pods",
+                  "gradle/build.gradle.kts": "gradle/.gradle", "gradle2/package.json": "gradle2/.gradle",
+                  "web/package.json": "web/.next", "web2/pyproject.toml": "web2/.next",
+                  "nm/pyproject.toml": "nm/node_modules", "rs2/Cargo.toml": "rs2/dist", "dd/Podfile": "dd/DerivedData"}
+        for marker, folder in layout.items():
+            self.make(marker)
+            self.make(folder + "/blob.bin", 2 * MB, sparse=True)
+        self.age_dirs()
+        self.scan()
+        found = self.by_path(self.suggest())
+        expected = {"rust/target": "Rebuilds with cargo build", "py/.venv": "Rebuilds with pip install",
+                    "py2/venv": "Rebuilds with pip install", "pods/Pods": "Rebuilds with pod install",
+                    "gradle/.gradle": "Rebuilds with Gradle", "web/.next": "Rebuilds with rebuilding the project",
+                    "rs2/dist": "Rebuilds with rebuilding the project", "dd/DerivedData": "Rebuilds with Xcode"}
+        for folder, text in expected.items():
+            self.assertEqual(found[folder]["reasons"], [{"code": "rebuildable", "text": text}], folder)
+            self.assertEqual(found[folder]["tier"], "safe", folder)
+        for folder in ("js/target", "pods2/Pods", "gradle2/.gradle", "web2/.next", "nm/node_modules"):
+            self.assertNotIn(folder, found)
 
     def test_untouched_large_file_is_glance(self):
         self.make("old.mov", 50 * MB, age_days=900, sparse=True)

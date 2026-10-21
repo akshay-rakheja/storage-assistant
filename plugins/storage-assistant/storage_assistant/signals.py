@@ -21,12 +21,24 @@ MIN_DUPLICATE = 1_000_000  # matches the scanner's grouping threshold
 DUPLICATE_MAX_IDS = 5000
 GIT_MAX_REPOS = 50  # nested repos checked per folder; more and the folder is not offered
 MARKERS = ("package.json", "pyproject.toml", "requirements.txt", "setup.py", "Cargo.toml", "Podfile",
-           "build.gradle", "Gemfile", "go.mod", ".git")
+           "build.gradle", "build.gradle.kts", "settings.gradle", "Gemfile", "go.mod", ".git")
 REBUILDABLE = {"node_modules": "npm install", ".venv": "pip install", "venv": "pip install", "target": "cargo build",
                ".next": "rebuilding the project", ".nuxt": "rebuilding the project", "dist": "rebuilding the project",
                "build": "rebuilding the project", ".turbo": "rebuilding the project",
                ".parcel-cache": "rebuilding the project", "Pods": "pod install", "DerivedData": "Xcode",
                "__pycache__": "Python, automatically", ".gradle": "Gradle"}
+# A rebuildable name counts only beside the marker of the tool that rebuilds it; names not listed
+# here (dist, build, DerivedData, __pycache__) need any project marker.
+_JS = ("package.json",)
+_PY = ("pyproject.toml", "requirements.txt", "setup.py")
+REBUILD_MARKERS = {"target": ("Cargo.toml",), "Pods": ("Podfile",), "venv": _PY, ".venv": _PY,
+                   "node_modules": _JS, ".next": _JS, ".nuxt": _JS, ".turbo": _JS, ".parcel-cache": _JS,
+                   ".gradle": ("build.gradle", "build.gradle.kts", "settings.gradle")}
+# Public release and model hosts a download can be fetched from again. Anything else (mail, chat,
+# transfer services, presigned or private links) is only a hint.
+RELEASE_HOSTS = {"github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com",
+                 "codeload.github.com", "huggingface.co", "cdn-lfs.huggingface.co", "cdn-lfs-us-1.huggingface.co",
+                 "download.mozilla.org", "dl.google.com"}
 PARTIAL = (".crdownload", ".part", ".download")
 INSTALLERS = (".dmg", ".pkg", ".zip")
 ARCHIVES = (".zip", ".tar.gz", ".tgz", ".tar", ".7z", ".rar")
@@ -182,6 +194,15 @@ class _Scan:
             self._project[nid] = self.nodes[nid]["kind"] == "directory" and any(_exists(os.path.join(folder, m)) for m in MARKERS)
         return self._project[nid]
 
+    def rebuilds(self, folder_id):
+        """True when a rebuildable folder sits beside the marker its tool needs (any marker if unpaired)."""
+        markers = REBUILD_MARKERS.get(self.nodes[folder_id]["name"])
+        parent = self.nodes[folder_id]["parentId"]
+        if markers is None:
+            return self.is_project(parent)
+        base = self.abs(parent)
+        return any(_exists(os.path.join(base, m)) for m in markers)
+
     def in_project(self, nid):
         parent = self.nodes[nid]["parentId"]
         while parent is not None:
@@ -330,7 +351,8 @@ def suggest(engine, scan_id, scan_version, within_node_id=None, *, now, spotligh
         lower, size = name.lower(), int(node["rawLogicalBytes"])
         if node["kind"] == "directory":
             parent = node["parentId"]
-            if name in REBUILDABLE and scan.is_project(parent) and not scan.blocked[nid] and git_ok(nid):
+            if (name in REBUILDABLE and scan.is_project(parent) and scan.rebuilds(nid) and not scan.blocked[nid]
+                    and git_ok(nid)):
                 found.append(("glance" if scan.active(parent) else "safe", "rebuildable", "Rebuilds with " + REBUILDABLE[name]))
             elif lower.endswith(".app") and not scan.blocked[nid] and not scan.in_project(nid) and git_ok(nid):
                 there = scan.installed(name[:-4])
@@ -355,10 +377,13 @@ def suggest(engine, scan_id, scan_version, within_node_id=None, *, now, spotligh
             host = _host(info.get("whereFroms") or []) if lower.endswith(REDOWNLOADABLE) else None
             app = scan.installer_app(name)
             if app:
-                sure = not lower.endswith(".zip") or host or lower.endswith(".app.zip") or ZIP_TAIL.search(name[:-4])
+                # A .dmg/.pkg needs a download source; a .zip a source or an app-like name.
+                sure = host or lower.endswith(".zip") and (lower.endswith(".app.zip") or ZIP_TAIL.search(name[:-4]))
                 found.append(("safe" if sure else "glance", "installed_app", f"{app} is already installed"))
-            if host:
+            if host in RELEASE_HOSTS:
                 found.append(("safe", "redownloadable", f"Downloaded from {host}, can be fetched again"))
+            elif host:
+                found.append(("glance", "download_source", f"Downloaded from {host}"))
             if nid in exact or nid in possible:
                 duplicate_of[nid] = True
             last = max(info.get("lastUsed") or 0, (node.get("modifiedNs") or 0) / 1e9)
