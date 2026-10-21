@@ -13,7 +13,7 @@ CAVEATS = [
     "Observed regular-file bytes only; directory overhead and omitted entries are not included.",
     "Hardlink bytes are counted once, assigned to the lexically first observed relative path.",
     "Allocated estimate uses st_blocks × 512; APFS clones, compression and snapshots prevent exclusive physical attribution.",
-    "Neither apparent nor allocated bytes prove reclaimable space. No deletion capability exists.",
+    "Neither apparent nor allocated bytes prove exactly how much space deleting something would free.",
     "Cloud flags are metadata hints; real File Provider no-hydration behavior is unverified.",
     "A metadata snapshot is not atomic. Directory movement after validation has a residual read race.",
 ]
