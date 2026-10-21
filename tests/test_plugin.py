@@ -373,3 +373,40 @@ class MetadataWordingTests(unittest.TestCase):
         for doc in (storage_assistant.__doc__, cli_source, apps.resource_list()["resources"][0]["description"]):
             for stale in ("No content or mutation API", "Read-only alias treemap", "Read-only metadata companion"):
                 self.assertNotIn(stale, doc)
+
+
+class ViewReceiptTests(unittest.TestCase):
+    """I2 and I6 in both views (source-level: the views have no JS test harness)."""
+    PKG = ROOT / "plugins/storage-assistant/storage_assistant"
+    REFUSALS = "['INVALID_INPUT','STALE_SCAN','SCOPE_EXPIRED','NOT_AUTHORIZED','CONFLICT','UNSUPPORTED']"
+
+    def source(self, name):
+        return (self.PKG / name).read_text().replace(" ", "").replace('"', "'")
+
+    def function(self, text, header):
+        start = text.index(header)
+        depth, i = 0, text.index("{", start)
+        for j in range(i, len(text)):
+            depth += {"{": 1, "}": -1}.get(text[j], 0)
+            if depth == 0:
+                return text[start:j + 1]
+        self.fail(header)
+
+    def test_only_pre_action_codes_count_as_refused(self):
+        for name in ("inline/app.js", "web/app.js"):
+            with self.subTest(view=name):
+                text = self.source(name)
+                self.assertIn("REFUSALS=newSet(" + self.REFUSALS + ")", text)
+                self.assertIn("refused:REFUSALS.has(", text)
+                self.assertNotIn("{refused:true}", text)
+
+    def test_failed_rescan_keeps_the_receipt(self):
+        inline = self.source("inline/app.js")
+        fail = self.function(inline, "functionfail(code)")
+        self.assertNotIn("$('receipt').hidden=true", fail)
+        self.assertIn("receipt-only", fail)
+        web = self.source("web/app.js")
+        leave = self.function(web, "functionleaveCleanup()")
+        self.assertNotIn("'receipt'", leave)
+        css = (self.PKG / "inline/style.css").read_text()
+        self.assertIn("#view.receipt-only>:not(#receipt){display:none}", css.replace(" ", ""))

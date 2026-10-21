@@ -83,6 +83,8 @@ let cleanup=null,ticked=new Set(),seen=new Set(),reviewing=[],previews=null,dele
 const okBytes=x=>typeof x==='string'&&DIGITS.test(x);
 const short=(s,n)=>typeof s==='string'&&s.length>0&&s.length<=n;
 const human=x=>{const n=Number(x),units=['B','KB','MB','GB','TB'];let i=0,v=n;while(v>=1000&&i<units.length-1){v/=1000;i++;}return (i?v.toFixed(v>=100?0:1):String(n))+' '+units[i];};
+// Codes the local session returns before touching anything; any other failure leaves the outcome unknown.
+const REFUSALS=new Set(['INVALID_INPUT','STALE_SCAN','SCOPE_EXPIRED','NOT_AUTHORIZED','CONFLICT','UNSUPPORTED']);
 const items=n=>`${n.toLocaleString()} ${n===1?'item':'items'}`;
 const sum=list=>list.reduce((n,c)=>n+BigInt(c.freesBytes||'0'),0n).toString();
 const cleanOn=()=>!!cleanup&&!!state?.scan&&cleanup.scanId===state.scan.scanId&&cleanup.scanVersion===state.scan.scanVersion;
@@ -94,9 +96,9 @@ async function cleanupApi(route,data){
   try{response=await fetch(`/api/cleanup/${route}`,{method:'POST',headers:{'Content-Type':'application/json','X-Storage-Request':'local-ui'},body:JSON.stringify(data)});result=await response.json();}
   catch{throw Object.assign(new Error('No answer came back from the local session.'),{refused:false});}
   if(!response.ok||result?.ok!==true){
-    // A structured refusal: the local session answered and says what did not happen.
-    const m=typeof result?.error==='string'?result.error:result?.error?.message;
-    throw Object.assign(new Error(short(m,300)?m:'The local session could not do this. Review again.'),{refused:true});
+    // A structured refusal (answered before acting) only for the known pre-action codes.
+    const m=typeof result?.error==='string'?result.error:result?.error?.message,code=result?.code??result?.error?.code;
+    throw Object.assign(new Error(short(m,300)?m:'The local session could not do this. Review again.'),{refused:REFUSALS.has(code)});
   }
   return result.data;
 }
@@ -118,7 +120,8 @@ function accept(data,scan){
 }
 function leaveCleanup(){
   cleanup=null;ticked=new Set();seen=new Set();previews=null;deleting=null;resuggest=null;
-  for(const id of ['cleanup','review','confirm-delete','receipt','tray'])$(id).hidden=true;
+  // The receipt stays until the person clicks Done, closes clean-up or reviews again.
+  for(const id of ['cleanup','review','confirm-delete','tray'])$(id).hidden=true;
 }
 function syncCleanup(){
   // Candidates belong to one scan. After a change the plugin rescans; suggest again once that finishes.
@@ -251,8 +254,8 @@ async function execute(a){
     renderReview(cleanup?reviewing.map(id=>cleanup.byId.get(id)).filter(Boolean):[],{});
     if(e.refused)$('review-status').textContent=`${e.message} Nothing more was sent. Go back and review again; Refresh shows the current state.`;
     else{
-      // The connection failed: the session may have acted before the answer was lost.
-      $('review-status').textContent='The result is unknown: no answer came back from the local session, so some items may already have been moved or deleted. Refresh the map to check what changed before doing anything else.';
+      // The connection failed or an unexpected error: the session may have acted before it stopped.
+      $('review-status').textContent='The result is unknown: the local session did not confirm what happened, so some items may already have been moved or deleted. Refresh the map to check what changed before doing anything else.';
       $('check-refresh').hidden=false;
     }
     $('review-title').focus();
@@ -309,7 +312,7 @@ async function reveal(c,quick){
 }
 function cancelDelete(){if(acting)return;deleting=null;$('confirm-delete').hidden=true;review(null,true);$('review-title').focus();}
 $('suggest').onclick=()=>suggest();
-$('cleanup-close').onclick=()=>{if(!acting){leaveCleanup();render();}};
+$('cleanup-close').onclick=()=>{if(!acting){leaveCleanup();$('receipt').hidden=true;render();}};
 $('tray-review').onclick=()=>review();
 $('review-back').onclick=()=>{if(acting)return;previews=null;$('review').hidden=true;renderCleanup();};
 $('do-trash').onclick=()=>execute('trash');

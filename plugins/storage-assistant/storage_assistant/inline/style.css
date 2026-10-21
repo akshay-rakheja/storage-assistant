@@ -160,3 +160,4 @@ button.danger{background:none;border-color:var(--danger);color:var(--danger)}
 @media (prefers-reduced-motion:no-preference){
   .tile{transition:filter .12s}
 }
+#view.receipt-only>:not(#receipt){display:none}

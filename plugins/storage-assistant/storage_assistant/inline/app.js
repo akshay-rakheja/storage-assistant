@@ -7,6 +7,8 @@
   let selected = null, shared = false, sharing = false, contextMayRemain = false, contextQueue = Promise.resolve(), operation = 0, busy = false, watermark = 0, revision = 0;
   const CLOSED = 'View closed. Ask the assistant to query and render a new view.';
   const UNREVOKED = 'View closed; context revocation was not acknowledged. The host may retain the previous selection. Query and share a new view before a follow-up.';
+  // Codes the plugin returns before touching anything; any other failure leaves the outcome unknown.
+  const REFUSALS = new Set(['INVALID_INPUT','STALE_SCAN','SCOPE_EXPIRED','NOT_AUTHORIZED','CONFLICT','UNSUPPORTED']);
   const ID = /^[a-f0-9]{32}$/, BYTES = /^(0|[1-9][0-9]{0,29})$/;
   const kinds = new Set(['directory','file','symlink','other']);
   const categories = new Set(['video','audio','image','archive','document','source','other']);
@@ -44,8 +46,9 @@
       INVALID_INPUT:'The page cursor or request is invalid. Refresh the view.',
       NOT_FOUND:'The item or resource is unavailable. Refresh the connection and current view.'
     };
-    current = null; selected = null; operation++; busy = false; leaveCleanup(); $('receipt').hidden = true;
-    $('view').hidden = true; $('rows').replaceChildren(); $('map').replaceChildren();
+    current = null; selected = null; operation++; busy = false; leaveCleanup();
+    // A receipt stays until the person clicks Done or reviews again, even when the map cannot be shown.
+    const keep = !$('receipt').hidden; $('view').hidden = !keep; $('view').classList.toggle('receipt-only', keep); $('rows').replaceChildren(); $('map').replaceChildren();
     if (shared || sharing) clearContext();
     status(messages[code] || 'The host returned an unsupported result. Refresh connection metadata and try again.'); controls();
   }
@@ -133,7 +136,7 @@
   function swatch(kind){const i=element('i');i.className='cat-'+kind;return i;}
   function render() {
     const v=current;if(!v)return;
-    $('view').hidden=false; $('basis').value=v.basis; $('aggregate').value=v.aggregate; status('');
+    $('view').hidden=false; $('view').classList.remove('receipt-only'); $('basis').value=v.basis; $('aggregate').value=v.aggregate; status('');
     const metric=v.basis==='logical'?'logicalBytes':'allocatedEstimateBytes';
     const crumbs=v.breadcrumbs.map(n=>button(n.displayLabel,()=>load({withinNodeId:n.nodeId,aggregate:'children'},true)));
     if(crumbs.length)crumbs[crumbs.length-1].setAttribute('aria-current','location');
@@ -278,8 +281,8 @@
     const envelope = result?.structuredContent;
     if (envelope?.ok !== true || result?.isError) {
       const m = envelope?.error?.message;
-      // A structured refusal: the plugin answered and says what did not happen.
-      throw Object.assign(new Error(short(m,300) ? m : 'The plugin could not do this. Review again.'), {refused:true});
+      // A structured refusal (the plugin answered before acting) only for the known pre-action codes.
+      throw Object.assign(new Error(short(m,300) ? m : 'The plugin could not do this. Review again.'), {refused:REFUSALS.has(envelope?.error?.code)});
     }
     return envelope.data;
   }
@@ -355,8 +358,8 @@
       renderReview(cleanup ? reviewing.map(id=>cleanup.byId.get(id)).filter(Boolean) : [], {});
       if (e.refused) $('review-status').textContent = `${e.message} Nothing more was sent. Go back and review again; Refresh shows the current state.`;
       else {
-        // Timeout or bridge failure: the plugin may have acted before the answer was lost.
-        $('review-status').textContent = 'The result is unknown: no answer came back from the plugin, so some items may already have been moved or deleted. Refresh the map to check what changed before doing anything else.';
+        // Timeout, bridge failure or an unexpected error: the plugin may have acted before it stopped.
+        $('review-status').textContent = 'The result is unknown: the plugin did not confirm what happened, so some items may already have been moved or deleted. Refresh the map to check what changed before doing anything else.';
         $('check-refresh').hidden = false;
       }
       $('review-title').focus();
@@ -436,7 +439,11 @@
   $('confirm-delete').addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); cancelDelete(); } });
   $('check-refresh').onclick = () => { if (acting) return; $('review').hidden = true; renderCleanup(); load(); };
   $('open-trash').onclick = () => settings({}, true);
-  $('receipt-close').onclick = () => { if (acting) return; $('receipt').hidden = true; renderCleanup(); resize(); };
+  $('receipt-close').onclick = () => {
+    if (acting) return; $('receipt').hidden = true;
+    if ($('view').classList.contains('receipt-only')) { $('view').classList.remove('receipt-only'); $('view').hidden = true; }
+    renderCleanup(); resize();
+  };
   $('optin-git').onchange = () => settings({gitHealth:$('optin-git').checked});
   $('optin-dup').onchange = () => settings({exactDuplicates:$('optin-dup').checked});
   function theme(context) {
