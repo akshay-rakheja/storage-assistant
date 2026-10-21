@@ -19,6 +19,7 @@ SPOTLIGHT_MAX = 300
 MIN_UNTOUCHED = MIN_ICLOUD = 10_000_000  # smaller old files are noise in a review list
 MIN_DUPLICATE = 1_000_000  # matches the scanner's grouping threshold
 DUPLICATE_MAX_IDS = 5000
+GIT_MAX_REPOS = 50  # nested repos checked per folder; more and the folder is not offered
 MARKERS = ("package.json", "pyproject.toml", "requirements.txt", "setup.py", "Cargo.toml", "Podfile",
            "build.gradle", "Gemfile", "go.mod", ".git")
 REBUILDABLE = {"node_modules": "npm install", ".venv": "pip install", "venv": "pip install", "target": "cargo build",
@@ -34,6 +35,9 @@ REDOWNLOADABLE = INSTALLERS + ARCHIVES + (".iso", ".xip", ".gguf", ".safetensors
 STRONG = {"rebuildable", "installed_app", "app_copy", "partial_download", "redownloadable", "repo_clean"}
 TIER_ORDER = {"safe": 0, "glance": 1, "your_call": 2}
 VERSION_TAIL = re.compile(r"[-_ .](v?\d|darwin|macos|mac|osx|universal|arm64|aarch64|x64|x86_64|intel|apple|installer|setup)", re.I)
+# A .zip named like an installed app is an installer only with a version or platform tail
+# (a bare name or a year such as "-2023" may be a backup or an export).
+ZIP_TAIL = re.compile(r"[-_ .](v?\d+(\.\d+)+|v\d+|darwin|macos|mac|osx|universal|arm64|aarch64|x64|x86_64|intel)(?=$|[-_ .])", re.I)
 
 
 def _date(text):
@@ -138,7 +142,7 @@ class _Scan:
         self.nodes, self.root_id, self.base, self.now = nodes, root_id, base, now
         self.applications = [os.path.expanduser(a) for a in applications]
         self.children, self.rel, self.shelter = {}, {root_id: "."}, {root_id: False}
-        self.newest, self.blocked, self.linked = {}, {}, {}
+        self.newest, self.blocked, self.linked, self.repos = {}, {}, {}, {}
         for nid, node in nodes.items():  # parents precede children
             parent = node["parentId"]
             self.children.setdefault(parent, []).append(nid)
@@ -159,6 +163,12 @@ class _Scan:
                 self.blocked[parent] = self.blocked.get(parent, False) or self.blocked[nid]
                 self.linked[parent] = self.linked.get(parent, False) or self.linked[nid]
         for nid, node in nodes.items():
+            if node["name"] == ".git" and node["parentId"] in nodes:  # .git folders and gitlink files
+                up = node["parentId"]
+                repo = up
+                while up is not None:
+                    self.repos.setdefault(up, set()).add(repo)
+                    up = nodes[up]["parentId"]
             if not self.newest[nid]:
                 self.newest[nid] = node.get("modifiedNs") or 0  # empty folder: its own time
         self._project, self._active = {}, {}
@@ -208,17 +218,30 @@ class _Scan:
         stem = _strip(name, INSTALLERS)
         if not stem:
             return None
+        if stem.lower().endswith(".app"):
+            stem = stem[:-4]
         tail = VERSION_TAIL.search(stem)
         options = [stem] + ([stem[:tail.start()]] if tail and tail.start() > 0 else [])
         options += [o.replace("-", " ").replace("_", " ") for o in options]
         return next((o for o in dict.fromkeys(options) if o.strip() and self.installed(o)), None)
 
 
+def _disposable(scan, nid):
+    """Inside a rebuildable folder, app or download folder: may be removed as a whole."""
+    up = scan.nodes[nid]["parentId"]
+    while up is not None:
+        name = scan.nodes[up]["name"]
+        if name in REBUILDABLE or name.lower().endswith((".app", ".download")):
+            return True
+        up = scan.nodes[up]["parentId"]
+    return False
+
+
 def _duplicates(scan, flaggable):
     """Same name and size across the whole scan: duplicate nodeId -> kept nodeId.
 
-    The kept copy is one that cannot be flagged (for example inside a project) when
-    there is one, else the shortest path.
+    The kept copy is preferably outside rebuildable folders, apps and downloads, then
+    one that cannot be flagged (for example inside a project), then the shortest path.
     """
     groups = {}
     for nid, node in scan.nodes.items():
@@ -227,7 +250,7 @@ def _duplicates(scan, flaggable):
             groups.setdefault((node["name"], node["rawLogicalBytes"]), []).append(nid)
     pairs = {}
     for ids in groups.values():
-        ids.sort(key=lambda i: (i in flaggable, len(scan.rel[i]), scan.rel[i]))
+        ids.sort(key=lambda i: (_disposable(scan, i), i in flaggable, len(scan.rel[i]), scan.rel[i]))
         pairs.update({extra: ids[0] for extra in ids[1:] if extra in flaggable})
     return pairs
 
@@ -281,7 +304,25 @@ def suggest(engine, scan_id, scan_version, within_node_id=None, *, now, spotligh
         same_size = [i for ids in sizes.values() if len(ids) > 1 for i in ids][:DUPLICATE_MAX_IDS]
         exact = checks.exact_duplicates(engine, same_size) if same_size else {}
 
-    hits = {}
+    health_cache = {}
+
+    def healthy(repo):
+        if repo not in health_cache:
+            health = checks.git_health(scan.abs(repo)) or {}
+            health_cache[repo] = health.get("clean") is True and health.get("pushed") is True
+            health_cache[repo, "host"] = health.get("remoteHost")
+        return health_cache[repo]
+
+    def git_ok(nid):
+        """No repo below (or at) this folder, or every one is pushed with nothing unsaved (opt-in)."""
+        repos = scan.repos.get(nid, ())
+        if not repos:
+            return True
+        if "gitHealth" not in opt_in or len(repos) > GIT_MAX_REPOS:
+            return False
+        return all(healthy(r) for r in sorted(repos, key=lambda r: scan.rel[r]))
+
+    hits, duplicate_of = {}, {}
     for nid in scope:
         if nid not in eligible:
             continue
@@ -289,9 +330,9 @@ def suggest(engine, scan_id, scan_version, within_node_id=None, *, now, spotligh
         lower, size = name.lower(), int(node["rawLogicalBytes"])
         if node["kind"] == "directory":
             parent = node["parentId"]
-            if name in REBUILDABLE and scan.is_project(parent) and not scan.blocked[nid]:
+            if name in REBUILDABLE and scan.is_project(parent) and not scan.blocked[nid] and git_ok(nid):
                 found.append(("glance" if scan.active(parent) else "safe", "rebuildable", "Rebuilds with " + REBUILDABLE[name]))
-            elif lower.endswith(".app") and not scan.blocked[nid] and not scan.in_project(nid):
+            elif lower.endswith(".app") and not scan.blocked[nid] and not scan.in_project(nid) and git_ok(nid):
                 there = scan.installed(name[:-4])
                 try:
                     here = os.lstat(scan.abs(nid))
@@ -299,40 +340,65 @@ def suggest(engine, scan_id, scan_version, within_node_id=None, *, now, spotligh
                     here = None
                 if there and here and (there.st_dev, there.st_ino) != (here.st_dev, here.st_ino):
                     found.append(("safe", "app_copy", "Copy in Applications"))
-            elif ("gitHealth" in opt_in and _exists(os.path.join(scan.abs(nid), ".git"))
+            elif ("gitHealth" in opt_in and nid in scan.repos.get(nid, ())
                   and not scan.blocked[nid] and not scan.linked[nid]):
-                health = checks.git_health(scan.abs(nid)) or {}
-                if health.get("clean") is True and health.get("pushed") is True:
-                    host = health.get("remoteHost")
+                if git_ok(nid):  # the repo itself and every nested repo or submodule
+                    host = health_cache.get((nid, "host"))
                     found.append(("safe", "repo_clean", f"Pushed to {host}, nothing unsaved" if host else "Pushed, nothing unsaved"))
-            elif lower.endswith(".download") and not scan.blocked[nid] and not scan.in_project(nid):
+            elif (lower.endswith(".download") and not scan.blocked[nid] and not scan.linked[nid]
+                  and not scan.in_project(nid) and git_ok(nid)):
                 found.append(("safe", "partial_download", "Unfinished download"))
         elif free_file(nid):
             info = meta.get(scan.abs(nid)) or {}
             if lower.endswith(PARTIAL):
                 found.append(("safe", "partial_download", "Unfinished download"))
+            host = _host(info.get("whereFroms") or []) if lower.endswith(REDOWNLOADABLE) else None
             app = scan.installer_app(name)
             if app:
-                found.append(("safe", "installed_app", f"{app} is already installed"))
-            host = _host(info.get("whereFroms") or []) if lower.endswith(REDOWNLOADABLE) else None
+                sure = not lower.endswith(".zip") or host or lower.endswith(".app.zip") or ZIP_TAIL.search(name[:-4])
+                found.append(("safe" if sure else "glance", "installed_app", f"{app} is already installed"))
             if host:
                 found.append(("safe", "redownloadable", f"Downloaded from {host}, can be fetched again"))
-            if nid in exact and exact[nid] in scan.rel:
-                found.append(("safe", "exact_duplicate", "Exact duplicate of " + scan.rel[exact[nid]]))
+            if nid in exact or nid in possible:
+                duplicate_of[nid] = True
             last = max(info.get("lastUsed") or 0, (node.get("modifiedNs") or 0) / 1e9)
             if size >= MIN_UNTOUCHED and last and now - last >= UNTOUCHED:
                 found.append(("glance", "untouched", "Untouched since " + str(time.localtime(last).tm_year)))
             stem = _strip(name, ARCHIVES)
             if stem and any(nodes[s]["kind"] == "directory" and nodes[s]["name"] == stem for s in scan.children.get(node["parentId"], [])):
                 found.append(("glance", "unzipped", "Already unzipped"))
-            if nid in possible and nid not in exact:
-                found.append(("glance", "possible_duplicate", "Possible duplicate of " + scan.rel[possible[nid]]))
             if size >= MIN_ICLOUD and node["placeholder"] == "no" and checks.is_icloud_synced(scan.abs(nid)):
                 found.append((None, "icloud_copy", "Also in iCloud"))
         if node["protection"] == "protected":
             found = [f for f in found if f[1] in STRONG]
+            duplicate_of.pop(nid, None)
         if found:
             hits[nid] = found
+
+    # Duplicate reasons last: the kept copy must survive, so it may not be the item itself,
+    # flagged as a duplicate in turn (this also breaks cycles), a candidate, inside one, or
+    # inside a rebuildable folder, app or download folder (which a wider view may offer).
+    flagged = set(exact) | set(possible)
+
+    def keeps(nid, kept):
+        if kept == nid or kept not in nodes or kept in flagged or _disposable(scan, kept):
+            return False
+        up = kept
+        while up is not None:
+            if up in hits:
+                return False
+            up = nodes[up]["parentId"]
+        return True
+
+    for nid in duplicate_of:
+        if keeps(nid, exact.get(nid)):
+            reason = ("safe", "exact_duplicate", "Exact duplicate of " + scan.rel[exact[nid]])
+        elif keeps(nid, possible.get(nid)):
+            reason = ("glance", "possible_duplicate", "Possible duplicate of " + scan.rel[possible[nid]])
+        else:
+            continue
+        found = hits.setdefault(nid, [])
+        found.insert(next((i for i, f in enumerate(found) if f[1] == "icloud_copy"), len(found)), reason)
 
     candidates = []
     with engine.lock:

@@ -32,6 +32,8 @@ class FakeChecks:
 
     def git_health(self, abs_path):
         self.git_calls.append(abs_path)
+        if callable(self.git):
+            return self.git(abs_path)
         return self.git or {"clean": False, "pushed": False, "remoteHost": None}
 
     def exact_duplicates(self, engine, node_ids):
@@ -237,6 +239,43 @@ class SignalTests(unittest.TestCase):
         self.assertEqual(result["/a/two.zip"], {"lastUsed": None, "whereFroms": []})
         self.assertEqual(signals.Spotlight(lambda argv, **k: type("R", (), {"stdout": b"x"})()).metadata(["/a", "/b"]), {})
 
+    def test_rebuildable_folder_with_nested_repo_needs_git_optin(self):
+        self.make("proj/pyproject.toml")
+        self.make("proj/.venv/lib/site.py", 2 * MB)
+        self.make("proj/.venv/src/pkg/.git/HEAD")
+        self.make("proj/.venv/src/pkg/edited.py")
+        self.age_dirs()
+        self.scan()
+        self.assertNotIn("proj/.venv", self.by_path(self.suggest()))
+        clean = {"clean": True, "pushed": True, "remoteHost": None}
+        dirty = lambda path: clean if not path.endswith("/pkg") else {"clean": False, "pushed": True, "remoteHost": None}
+        checks = FakeChecks(git=dirty)
+        self.assertNotIn("proj/.venv", self.by_path(self.suggest(checks=checks, opt_in=frozenset({"gitHealth"}))))
+        self.assertTrue(any(p.endswith("/.venv/src/pkg") for p in checks.git_calls))
+        found = self.by_path(self.suggest(checks=FakeChecks(git=clean), opt_in=frozenset({"gitHealth"})))
+        self.assertEqual(found["proj/.venv"]["tier"], "safe")
+
+    def test_nested_gitlink_file_is_seen(self):
+        self.make("proj/package.json")
+        self.make("proj/node_modules/dep/index.js", 2 * MB)
+        self.make("proj/node_modules/dep/.git")  # a submodule/worktree gitlink file stays a node
+        self.age_dirs()
+        self.scan()
+        self.assertNotIn("proj/node_modules", self.by_path(self.suggest()))
+
+    def test_whole_repo_with_failing_nested_repo_not_suggested(self):
+        self.make("repo/.git/HEAD")
+        self.make("repo/main.py")
+        self.make("repo/vendor/lib/.git/HEAD")
+        self.make("repo/vendor/lib/code.py")
+        self.age_dirs()
+        self.scan()
+        clean = {"clean": True, "pushed": True, "remoteHost": "github.com"}
+        nested_dirty = lambda path: {"clean": False, "pushed": False, "remoteHost": None} if path.endswith("/lib") else clean
+        self.assertEqual(self.suggest(checks=FakeChecks(git=nested_dirty), opt_in=frozenset({"gitHealth"}))["candidates"], [])
+        found = self.by_path(self.suggest(checks=FakeChecks(git=clean), opt_in=frozenset({"gitHealth"})))
+        self.assertEqual(set(found), {"repo"})
+
     def test_whole_repo_requires_git_optin_and_no_skipped_descendants(self):
         self.make("repo/.git/HEAD")
         self.make("repo/.git/objects/pack/p.pack", 3 * MB)
@@ -309,6 +348,65 @@ class SignalTests(unittest.TestCase):
         dup = self.by_path(self.suggest(checks=checks, opt_in=frozenset({"exactDuplicates"})))["backup/clip.mp4"]
         self.assertEqual(dup["tier"], "safe")
         self.assertEqual(dup["reasons"][0], {"code": "exact_duplicate", "text": "Exact duplicate of a/clip.mp4"})
+
+    def test_zip_named_like_app_needs_corroboration(self):
+        self.make("Obsidian.zip", 2 * MB)
+        self.make("Slack-2023.zip", 2 * MB)
+        self.make("Cyberduck-9.1.2.zip", 2 * MB)
+        self.make("Zed.app.zip", 2 * MB)
+        self.make("Linear.zip", 2 * MB)
+        for app in ("Obsidian", "Slack", "Cyberduck", "Zed", "Linear"):
+            (self.apps / (app + ".app")).mkdir()
+        self.age_dirs()
+        self.scan()
+        spotlight = FakeSpotlight({"Linear.zip": {"lastUsed": None, "whereFroms": ["https://linear.app/download"]}})
+        found = self.by_path(self.suggest(spotlight))
+        for weak in ("Obsidian.zip", "Slack-2023.zip"):
+            self.assertEqual(found[weak]["tier"], "glance", weak)
+            self.assertFalse(found[weak]["preTicked"])
+            self.assertNotIn("delete", found[weak]["actions"])
+        for sure in ("Cyberduck-9.1.2.zip", "Zed.app.zip", "Linear.zip"):
+            self.assertEqual(found[sure]["tier"], "safe", sure)
+        self.assertIn({"code": "installed_app", "text": "Cyberduck is already installed"}, found["Cyberduck-9.1.2.zip"]["reasons"])
+        self.assertIn({"code": "installed_app", "text": "Zed is already installed"}, found["Zed.app.zip"]["reasons"])
+
+    def test_kept_duplicate_inside_candidate_is_not_flagged(self):
+        self.make("p/package.json")
+        self.make("p/node_modules/x/clip.mp4", 20 * MB, sparse=True)
+        self.make("backup/clip.mp4", 20 * MB, sparse=True)
+        self.age_dirs()
+        self.scan()
+        with self.plugin.engine.lock:
+            ids = {self.plugin.engine.relative_path(n): k for k, n in self.plugin.engine.scan["nodes"].items()}
+        bad = FakeChecks(duplicates={ids["backup/clip.mp4"]: ids["p/node_modules/x/clip.mp4"]})
+        for checks in (FakeChecks(), bad):
+            found = self.by_path(self.suggest(checks=checks, opt_in=frozenset({"exactDuplicates"})))
+            self.assertEqual(set(found), {"p/node_modules"})
+
+    def test_cyclic_exact_duplicates_never_flag_both(self):
+        self.make("a/clip.mp4", 20 * MB, sparse=True)
+        self.make("b/clip.mp4", 20 * MB, sparse=True)
+        self.age_dirs()
+        self.scan()
+        with self.plugin.engine.lock:
+            ids = {self.plugin.engine.relative_path(n): k for k, n in self.plugin.engine.scan["nodes"].items()}
+        a, b = ids["a/clip.mp4"], ids["b/clip.mp4"]
+        for mapping in ({a: b, b: a}, {a: a}):
+            result = self.suggest(checks=FakeChecks(duplicates=mapping), opt_in=frozenset({"exactDuplicates"}))
+            codes = [r["code"] for c in result["candidates"] for r in c["reasons"]]
+            self.assertNotIn("exact_duplicate", codes)
+            self.assertFalse(any(c["preTicked"] for c in result["candidates"]))
+            self.assertLessEqual(len(result["candidates"]), 1)
+
+    def test_download_folder_with_link_not_suggested(self):
+        self.make("plain.download/data.bin", 2 * MB)
+        self.make("linked.download/data.bin", 2 * MB)
+        os.symlink("/tmp", self.root / "linked.download" / "out")
+        self.age_dirs()
+        self.scan()
+        found = self.by_path(self.suggest())
+        self.assertEqual(found["plain.download"]["reasons"], [{"code": "partial_download", "text": "Unfinished download"}])
+        self.assertNotIn("linked.download", found)
 
     def test_partial_download_is_safe(self):
         self.make("big.iso.crdownload", 2 * MB)

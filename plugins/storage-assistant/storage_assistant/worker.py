@@ -76,7 +76,7 @@ def walk(root_fd, limits, emit, metadata=os.stat, enumerate_dir=os.scandir,
 
     def small_file(fd, name, st, in_app):
         """Validated small file eligible for grouping, or None (then it is recorded individually)."""
-        if in_app or name.lower().endswith(UNGROUPED_SUFFIXES):
+        if in_app or name == ".git" or name.lower().endswith(UNGROUPED_SUFFIXES):  # .git files mark nested repos
             return None
         if not (full and st.st_size < SMALL_FILE and st.st_nlink <= 1 and hasattr(st, "st_blocks")):
             return None
