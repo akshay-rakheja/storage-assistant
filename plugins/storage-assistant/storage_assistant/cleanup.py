@@ -36,6 +36,7 @@ DENIED = "macOS denied access"
 TOO_MANY = "Too many files inside to check safely"
 OUTSIDE = "Outside the selected folder"
 RESCANNED = "This folder was rescanned. Review again."
+MOVED = "This item changed since the scan. Scan again to see it."
 TRASH_NOTE = "Space is freed when you empty the Trash."
 # Not in the plan's list: Remove Download returned but macOS still reports the file as downloaded.
 NOT_EVICTED = "macOS did not confirm the download was removed"
@@ -99,6 +100,29 @@ class Cleanup:
         except OSError:
             raise StorageError("UNAVAILABLE", "Could not open the Trash.") from None
         return {"opened": True}
+
+    def locate(self, scan_id, scan_version, node_id):
+        """Absolute path of a scanned file or folder, after the same no-follow re-check preview uses.
+
+        For Show in Finder and Quick Look only; raises StorageError when the item no longer matches the scan."""
+        if not isinstance(scan_id, str) or type(scan_version) is not int or not isinstance(node_id, str):
+            raise StorageError("INVALID_INPUT", "Give the current scan and an item.")
+        engine = self.engine
+        with engine.lock:
+            scan = self._current(scan_id, scan_version)
+            node = scan["nodes"].get(node_id)
+            if (node is None or node["parentId"] is None or node["kind"] not in ("file", "directory")
+                    or "groupedFiles" in node):
+                raise StorageError("INVALID_INPUT", "This item can't be shown.")
+            relative = engine.relative_path(node)
+            expected = {"relative": relative, "kind": node["kind"], "modifiedNs": node.get("modifiedNs"),
+                        "size": int(node["rawLogicalBytes"]) if node["kind"] == "file" else None}
+            try:
+                self._with_item(expected, self._times(scan, self.clock()), None, lambda parent, name, st: None,
+                                check_walk=False)
+            except _Skip as skip:
+                raise StorageError("CONFLICT", MOVED if skip.reason == CHANGED else skip.reason) from None
+            return os.path.join(engine.grant.path, relative)
 
     # Preview
 

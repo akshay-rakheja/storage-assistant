@@ -150,7 +150,7 @@ class Plugin:
     def __init__(self, chooser=choose_folder, opener=webbrowser.open):
         self.engine = Engine(share_names=True, limits=PLUGIN_LIMITS, full_coverage=True)
         self.cleanup = Cleanup(self.engine, executor.Executor())
-        self.companion = Companion(self.engine)
+        self.companion = Companion(self.engine, cleanup=self.cleanup)
         self.chooser = chooser
         self.opener = opener
         self.thread = threading.Thread(target=self.companion.serve_forever, kwargs={"poll_interval": .1}, daemon=True)

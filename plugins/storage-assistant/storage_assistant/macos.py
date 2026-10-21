@@ -10,6 +10,7 @@ from typing import Optional
 
 TRASH_TOOL = "/usr/bin/trash"
 OPEN_TOOL = "/usr/bin/open"
+QUICK_LOOK_TOOL = "/usr/bin/qlmanage"
 
 
 def free_bytes(path: str) -> int:
@@ -23,6 +24,23 @@ def open_trash() -> None:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
     except (subprocess.SubprocessError, OSError) as error:
         raise OSError("could not open the Trash: %s" % error)
+
+
+def reveal(path: str, quick_look: bool) -> None:
+    """Show one absolute path in Finder (open -R) or in a Quick Look panel (qlmanage -p).
+
+    Fixed argv, no shell. Quick Look stays open until the person closes it, so it runs detached."""
+    if not os.path.isabs(path):
+        raise ValueError("absolute path required")
+    try:
+        if quick_look:
+            subprocess.Popen([QUICK_LOOK_TOOL, "-p", path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+        else:
+            subprocess.run([OPEN_TOOL, "-R", path], check=True, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+    except (subprocess.SubprocessError, OSError) as error:
+        raise OSError("could not show the item: %s" % type(error).__name__)
 
 
 def trash_item(path: str) -> Optional[str]:

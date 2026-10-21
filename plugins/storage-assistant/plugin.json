@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "storage-assistant",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Ask what's taking up space in a folder on your Mac and explore it as a treemap. Read-only: never opens or deletes files.",
   "extensions": {
     "com.openai": {

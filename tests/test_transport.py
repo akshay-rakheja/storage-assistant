@@ -14,26 +14,12 @@ from storage_assistant.server import Companion
 from storage_assistant.mcp import load_session
 
 ROOT = Path(__file__).resolve().parent.parent
+CLEANUP_ROUTES = ("suggest", "preview", "execute", "settings", "reveal")
+DAY = 86400
 
 
-class TransportTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.base = Path(self.tmp.name).resolve()
-        self.folder = self.base / "selected"
-        self.folder.mkdir()
-        (self.folder / "SYNTHETIC_PRIVATE_NAME.pdf").write_text("synthetic private contents")
-        self.server = Companion()
-        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": .05}, daemon=True)
-        self.thread.start()
-        self.cookie = None
-
-    def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
-        self.server.engine.close()
-        self.thread.join()
-        self.tmp.cleanup()
+class LocalClient:
+    """Requests from the paired local browser view (Host, Origin and X-Storage-Request as app.js sends them)."""
 
     def post(self, path, body, **headers):
         defaults = {"Host": self.server.host, "Origin": self.server.url,
@@ -55,6 +41,26 @@ class TransportTests(unittest.TestCase):
         status, _, cookie = self.post("/api/pair", {"code": self.server.pairing})
         self.assertEqual(status, 200)
         self.cookie = cookie.split(";", 1)[0]
+
+
+class TransportTests(LocalClient, unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name).resolve()
+        self.folder = self.base / "selected"
+        self.folder.mkdir()
+        (self.folder / "SYNTHETIC_PRIVATE_NAME.pdf").write_text("synthetic private contents")
+        self.server = Companion()
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": .05}, daemon=True)
+        self.thread.start()
+        self.cookie = None
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.server.engine.close()
+        self.thread.join()
+        self.tmp.cleanup()
 
     def test_wrong_host_origin_missing_pair_and_bridge_secret(self):
         for headers in ({"Host": "attacker.example"}, {"Origin": "https://attacker.example"}, {"Origin": None}, {"X-Storage-Request": None}):
@@ -95,6 +101,18 @@ class TransportTests(unittest.TestCase):
         self.assertIn("frame-ancestors 'none'", response.getheader("Content-Security-Policy"))
         response.read()
         connection.close()
+
+    def test_local_cleanup_routes_require_pairing(self):
+        bodies = {"suggest": {"scanId": "0" * 32, "scanVersion": 1},
+                  "preview": {"scanId": "0" * 32, "scanVersion": 1, "nodeIds": ["0" * 32], "action": "trash"},
+                  "execute": {"token": "0" * 32}, "settings": {"optIn": {"gitHealth": True}},
+                  "reveal": {"scanId": "0" * 32, "scanVersion": 1, "nodeId": "0" * 32, "quickLook": False}}
+        for route in CLEANUP_ROUTES:
+            self.assertEqual(self.post("/api/cleanup/" + route, bodies[route])[0], 401, route)
+            self.assertEqual(self.post("/api/cleanup/" + route, bodies[route], **{"X-Storage-Request": None})[0], 403, route)
+        self.pair()
+        for route in CLEANUP_ROUTES:  # serve/demo companions have no cleanup service
+            self.assertEqual(self.post("/api/cleanup/" + route, bodies[route])[0], 404, route)
 
     def test_real_stdio_subprocess_initialization_and_call(self):
         descriptor = self.base / "session.json"
@@ -165,3 +183,188 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0)
         self.assertEqual(errors, "")
         self.assertEqual(set(self.base.iterdir()), before)
+
+
+class LocalCleanupTests(LocalClient, unittest.TestCase):
+    """The paired local view's cleanup routes, end to end through the plugin's own companion."""
+
+    def setUp(self):
+        from storage_assistant.executor import FakeExecutor
+        from storage_assistant.plugin import Plugin
+        from test_cleanup import FakeChecks, FakeSpotlight
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name).resolve()
+        self.root = self.base / "chosen"
+        self.trash = self.base / "FakeTrash"
+        (self.base / "Applications").mkdir()
+        self.trash.mkdir()
+        old = time.time() - 60 * DAY
+        for name, size in (("a.crdownload", 3000), ("b.part", 5000), ("keep/notes.zip", 100)):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x" * size)
+            os.utime(path, (old, old))
+        for d in (self.root / "keep", self.root):
+            os.utime(d, (old, old))
+        self.plugin = Plugin(chooser=lambda: str(self.root), opener=lambda url: True)
+        cleanup = self.plugin.cleanup
+        self.executor = cleanup.executor = FakeExecutor(str(self.trash))
+        cleanup.spotlight, cleanup.checks = FakeSpotlight(), FakeChecks()
+        cleanup.applications = (str(self.base / "Applications"),)
+        self.server = self.plugin.companion
+        self.revealed = []
+        self.server.reveal = lambda path, quick_look: self.revealed.append((path, quick_look))
+        self.cookie = None
+        self.call("storage_choose_folder", {})
+        self.status = self.scan()
+
+    def tearDown(self):
+        self.plugin.close()
+        self.tmp.cleanup()
+
+    def call(self, name, args):
+        body = self.plugin.invoke(name, args)["structuredContent"]
+        self.assertTrue(body["ok"], body)
+        return body["data"]
+
+    def scan(self):
+        grant = self.plugin.engine.grant.grant_id
+        status = self.call("storage_start_scan", {"grantId": grant, "requestId": opaque()})
+        for _ in range(400):
+            if status["state"] != "running":
+                return status
+            time.sleep(.05)
+            status = self.call("storage_scan_status", {"scanId": status["scanId"]})
+        self.fail("scan did not finish")
+
+    def node_id(self, relative):
+        engine = self.plugin.engine
+        with engine.lock:
+            return next(n["nodeId"] for n in engine.scan["nodes"].values() if engine.relative_path(n) == relative)
+
+    def scan_args(self, **extra):
+        return dict({"scanId": self.status["scanId"], "scanVersion": self.status["scanVersion"]}, **extra)
+
+    def test_unpaired_cleanup_routes_are_refused(self):
+        plan = self.plugin.cleanup.preview(self.status["scanId"], self.status["scanVersion"],
+                                           [self.node_id("a.crdownload")], "trash")
+        bodies = {"suggest": self.scan_args(), "execute": {"token": plan["token"]},
+                  "preview": self.scan_args(nodeIds=[self.node_id("a.crdownload")], action="trash"),
+                  "settings": {"optIn": {"gitHealth": True}, "openTrash": True},
+                  "reveal": self.scan_args(nodeId=self.node_id("a.crdownload"), quickLook=True)}
+        for route in CLEANUP_ROUTES:
+            self.assertEqual(self.post("/api/cleanup/" + route, bodies[route])[0], 401, route)
+            self.assertEqual(self.post("/api/cleanup/" + route, bodies[route], Cookie="storage_session=wrong")[0], 401, route)
+        self.assertEqual(self.executor.calls, [])
+        self.assertEqual(self.revealed, [])
+        self.assertTrue((self.root / "a.crdownload").exists())
+        self.assertEqual(self.plugin.cleanup.opt_in, set())
+        self.assertEqual(len(self.plugin.cleanup.execute(plan["token"])["done"]), 1)  # the token was not spent
+
+    def test_paired_suggest_preview_execute_receipt(self):
+        self.pair()
+        status, body, _ = self.post("/api/cleanup/suggest", self.scan_args())
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["ok"])
+        found = {c["path"]: c for c in body["data"]["candidates"]}
+        self.assertEqual(found["a.crdownload"]["tier"], "safe")
+        ids = [found["a.crdownload"]["nodeId"], found["b.part"]["nodeId"]]
+        status, body, _ = self.post("/api/cleanup/preview", self.scan_args(nodeIds=ids, action="trash"))
+        self.assertEqual(status, 200, body)
+        plan = body["data"]
+        self.assertEqual((plan["action"], plan["count"], len(plan["token"])), ("trash", 2, 32))
+        self.assertEqual(self.executor.calls, [])  # preview changes nothing
+        status, body, _ = self.post("/api/cleanup/execute", {"token": plan["token"]})
+        self.assertEqual(status, 200, body)
+        receipt = body["data"]
+        self.assertEqual(receipt["action"], "trash")
+        self.assertEqual(sorted(d["path"] for d in receipt["done"]), ["a.crdownload", "b.part"])
+        self.assertEqual((receipt["skipped"], receipt["failed"]), ([], []))
+        self.assertTrue(receipt["putBack"])
+        self.assertEqual(receipt["trashNote"], "Space is freed when you empty the Trash.")
+        self.assertEqual(sorted(os.listdir(self.trash)), ["a.crdownload", "b.part"])
+        self.assertTrue(receipt["rescan"]["started"])
+        calls = list(self.executor.calls)
+        status, body, _ = self.post("/api/cleanup/execute", {"token": plan["token"]})  # single use
+        self.assertEqual(status, 400)
+        self.assertEqual(body["code"], "INVALID_INPUT")
+        self.assertEqual(self.executor.calls, calls)
+
+    def test_paired_delete_and_bad_requests(self):
+        self.pair()
+        node = self.node_id("keep")
+        status, body, _ = self.post("/api/cleanup/preview", self.scan_args(nodeIds=[node], action="delete"))
+        self.assertEqual(status, 200, body)  # not suggested for permanent deletion: left out, no token
+        self.assertIsNone(body["data"]["token"])
+        self.assertEqual(body["data"]["skipped"][0]["reason"], "Not offered for this action")
+        for route, args in (("preview", self.scan_args(nodeIds=[node], action="rm -rf")),
+                            ("preview", self.scan_args(nodeIds=[node], action="trash", extra=1)),
+                            ("suggest", {"scanId": self.status["scanId"], "scanVersion": "1"}),
+                            ("execute", {"token": 5}),
+                            ("settings", {"optIn": {"unknown": True}}),
+                            ("reveal", self.scan_args(nodeId=node, quickLook="yes")),
+                            ("unknown", {})):
+            status, body, _ = self.post("/api/cleanup/" + route, args)
+            self.assertIn(status, (400, 404), route)
+        self.assertEqual(self.executor.calls, [])
+        status, body, _ = self.post("/api/cleanup/preview", dict(self.scan_args(nodeIds=[node], action="trash"), scanVersion=99))
+        self.assertEqual((status, body["code"]), (400, "STALE_SCAN"))
+
+    def test_settings_switch_opt_ins(self):
+        self.pair()
+        status, body, _ = self.post("/api/cleanup/settings", {"optIn": {"gitHealth": True}})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["data"]["optIn"], {"gitHealth": True, "exactDuplicates": False})
+        status, body, _ = self.post("/api/cleanup/settings", {"optIn": {}})
+        self.assertEqual(body["data"]["optIn"], {"gitHealth": True, "exactDuplicates": False})
+        self.post("/api/cleanup/settings", {"optIn": {"gitHealth": False}})
+        self.assertEqual(self.plugin.cleanup.opt_in, set())
+
+    def test_reveal_and_quick_look_revalidate(self):
+        self.pair()
+        args = self.scan_args(nodeId=self.node_id("keep/notes.zip"), quickLook=False)
+        status, body, _ = self.post("/api/cleanup/reveal", args)
+        self.assertEqual((status, body["ok"]), (200, True), body)
+        status, _, _ = self.post("/api/cleanup/reveal", dict(args, quickLook=True))
+        self.assertEqual(status, 200)
+        path = str(self.root / "keep/notes.zip")
+        self.assertEqual(self.revealed, [(path, False), (path, True)])
+        self.assertNotIn(path, json.dumps(body))  # the path stays in the executor
+        status, body, _ = self.post("/api/cleanup/reveal", self.scan_args(nodeId=self.plugin.engine.scan["rootNodeId"], quickLook=False))
+        self.assertEqual(status, 400)
+        (self.root / "keep/notes.zip").write_bytes(b"changed")  # no longer the scanned item
+        status, body, _ = self.post("/api/cleanup/reveal", args)
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "This item changed since the scan. Scan again to see it.")
+        (self.root / "keep/notes.zip").unlink()
+        os.symlink("/etc", self.root / "keep/notes.zip")
+        self.assertEqual(self.post("/api/cleanup/reveal", args)[0], 400)
+        self.assertEqual(len(self.revealed), 2)
+
+    def test_locate_returns_revalidated_absolute_path(self):
+        cleanup = self.plugin.cleanup
+        node = self.node_id("keep/notes.zip")
+        self.assertEqual(cleanup.locate(self.status["scanId"], self.status["scanVersion"], node),
+                         str(self.root / "keep/notes.zip"))
+        from storage_assistant.policy import StorageError
+        with self.assertRaises(StorageError) as caught:
+            cleanup.locate(self.status["scanId"], self.status["scanVersion"] + 1, node)
+        self.assertEqual(caught.exception.code, "STALE_SCAN")
+        with self.assertRaises(StorageError):
+            cleanup.locate(self.status["scanId"], self.status["scanVersion"], "0" * 32)
+
+
+class RevealCommandTests(unittest.TestCase):
+    def test_fixed_argv_without_shell(self):
+        from unittest import mock
+        from storage_assistant import macos
+        with mock.patch.object(macos.subprocess, "run") as run, mock.patch.object(macos.subprocess, "Popen") as popen:
+            macos.reveal("/x/-n; rm y", False)
+            macos.reveal("/x/-n; rm y", True)
+        self.assertEqual(run.call_args.args[0], ["/usr/bin/open", "-R", "/x/-n; rm y"])
+        self.assertNotIn("shell", run.call_args.kwargs)
+        self.assertIn("timeout", run.call_args.kwargs)
+        self.assertEqual(popen.call_args.args[0], ["/usr/bin/qlmanage", "-p", "/x/-n; rm y"])
+        self.assertNotIn("shell", popen.call_args.kwargs)
+        with self.assertRaises(ValueError):
+            macos.reveal("relative/path", False)
