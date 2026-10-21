@@ -1,0 +1,16 @@
+{
+  "name": "storage-assistant",
+  "owner": {
+    "name": "Akshay Rakheja"
+  },
+  "metadata": {
+    "description": "Storage Assistant: see what's taking up space on your Mac, right in Claude."
+  },
+  "plugins": [
+    {
+      "name": "storage-assistant",
+      "source": "./plugins/storage-assistant",
+      "description": "Read-only storage explorer with treemap and grounded questions."
+    }
+  ]
+}

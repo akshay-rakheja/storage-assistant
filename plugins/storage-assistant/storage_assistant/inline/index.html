@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Storage Assistant</title><style>/* BUNDLED_STYLE */</style></head><body>
+<main>
+<p id="status" role="status" aria-live="polite">Connecting to the host…</p>
+<section id="view" hidden>
+<header class="head">
+<nav id="breadcrumbs" aria-label="Folder path"></nav>
+<p id="summary"></p>
+</header>
+<div class="bar">
+<label><span class="visually-hidden">Measure</span><select id="basis"><option value="logical">File size</option><option value="allocated_estimate">Space on disk</option></select></label>
+<label><span class="visually-hidden">Group by</span><select id="aggregate"><option value="children">Items</option><option value="by_category">File types</option></select></label>
+<button id="refresh" type="button">Refresh</button>
+</div>
+<div id="map" role="group" aria-label="Treemap of this folder"></div>
+<ul id="legend" aria-label="Colour key"></ul>
+<p id="coverage"></p>
+<table><caption id="caption" class="visually-hidden">Items in this folder</caption>
+<thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col" class="num">Size</th></tr></thead><tbody id="rows"></tbody></table>
+<div class="pager"><button id="first" type="button">Back to the largest</button><button id="next" type="button">Show more</button><button id="share" type="button">Ask about the selected item</button></div>
+<p id="selection" role="status"></p>
+<details><summary>About these numbers</summary>
+<p>Names, sizes and dates of the folder you chose. File contents are never opened and nothing is changed.</p>
+<ul id="caveats"></ul></details>
+</section></main><script>/* BUNDLED_SCRIPT */</script></body></html>

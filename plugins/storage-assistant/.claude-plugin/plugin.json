@@ -1,0 +1,30 @@
+{
+  "name": "storage-assistant",
+  "version": "0.5.0",
+  "description": "Ask what's taking up space in a folder on your Mac and explore it as a treemap. Read-only: never opens or deletes files.",
+  "author": {
+    "name": "Akshay Rakheja"
+  },
+  "repository": "https://github.com/akshay-rakheja/storage-assistant",
+  "keywords": [
+    "storage",
+    "disk",
+    "treemap",
+    "macos"
+  ],
+  "mcpServers": {
+    "storage": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/run.py",
+        "plugin"
+      ],
+      "env": {
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    }
+  },
+  "homepage": "https://github.com/akshay-rakheja/storage-assistant",
+  "license": "MIT"
+}
