@@ -140,7 +140,7 @@ class Engine:
                             break
                         event["gaps"] = []
                         # Keep only what queries use: identity matters only for hardlinked files.
-                        del event["event"], event["modifiedNs"]
+                        del event["event"]  # modifiedNs stays: cleanup suggestions need file age
                         if event.pop("hardlinkCount", 0) <= 1:
                             # Paths only order hardlink attribution; single-link entries need neither.
                             del event["identity"], event["relative"]
@@ -268,6 +268,8 @@ class Engine:
             result["itemLogicalBytes"] = node["rawLogicalBytes"]
         if "groupedFiles" in node:
             result["groupedFiles"] = node["groupedFiles"]  # one entry standing for many small files
+        elif node.get("modifiedNs"):
+            result["modifiedAt"] = node["modifiedNs"] / 1e9
         if self.share_names:
             result["path"] = self.relative_path(node)
             if node["parentId"] is None and self.grant:

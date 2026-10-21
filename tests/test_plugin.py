@@ -1,5 +1,6 @@
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -87,6 +88,28 @@ class PluginTests(unittest.TestCase):
         # Relative paths only: the absolute location of the chosen folder is never returned.
         self.assertNotIn(self.temp.name, json.dumps(view))
         self.assertEqual(self.plugin.engine.view["selectionIds"], [top[0]["nodeId"]])
+
+    def _scan_rows(self):
+        status = self.scanned()
+        rows = self.tool("storage_query", {"scanId": status["scanId"], "scanVersion": status["scanVersion"],
+                                           "basis": "logical", "aggregate": "largest_files", "pageSize": 100})["data"]["rows"]
+        return status, rows
+
+    def test_small_installer_stays_selectable(self):
+        for name, size in (("Documents/setup.dmg", 10_000), ("Documents/x.crdownload", 5_000)):
+            (self.fixture / name).write_bytes(b"\0" * size)
+        _, rows = self._scan_rows()
+        labels = [r["displayLabel"] for r in rows]
+        self.assertIn("setup.dmg", labels)
+        self.assertIn("x.crdownload", labels)
+        for r in rows:
+            if r["displayLabel"] in ("setup.dmg", "x.crdownload"):
+                self.assertNotIn("groupedFiles", r)
+
+    def test_nodes_keep_modified_time(self):
+        _, rows = self._scan_rows()
+        row = next(r for r in rows if r["displayLabel"] == "sparse.mov")
+        self.assertAlmostEqual(row["modifiedAt"], os.stat(self.fixture / "Films/sparse.mov").st_mtime, delta=2)
 
     def test_plugin_grant_uses_larger_limits(self):
         self.rpc("initialize")

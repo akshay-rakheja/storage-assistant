@@ -9,6 +9,7 @@ import threading
 from .policy import excluded, identity, opaque, placeholder, skipped_in_full
 
 
+UNGROUPED_SUFFIXES = (".dmg", ".pkg", ".zip", ".tar", ".gz", ".7z", ".iso", ".crdownload", ".part", ".download", ".gguf", ".safetensors")
 SMALL_FILE = 1_000_000  # full mode: files under 1 MB are grouped per folder and category
 GROUP_WORDS = {"video": "video", "audio": "audio", "image": "image", "archive": "archive",
                "document": "document", "source": "code", "other": "other"}
@@ -73,8 +74,10 @@ def walk(root_fd, limits, emit, metadata=os.stat, enumerate_dir=os.scandir,
         return any(identity(metadata(n, dir_fd=p, follow_symlinks=False)) != expected
                    for p, n, expected in ancestry)
 
-    def small_file(fd, name, st):
+    def small_file(fd, name, st, in_app):
         """Validated small file eligible for grouping, or None (then it is recorded individually)."""
+        if in_app or name.lower().endswith(UNGROUPED_SUFFIXES):
+            return None
         if not (full and st.st_size < SMALL_FILE and st.st_nlink <= 1 and hasattr(st, "st_blocks")):
             return None
         state = placeholder(st, name)
@@ -97,7 +100,7 @@ def walk(root_fd, limits, emit, metadata=os.stat, enumerate_dir=os.scandir,
                   "identity": [0, 0, 0, 0], "modifiedNs": 0, "measuredAt": time.time(), "hardlinkCount": 1,
                   "protection": "review_required", "groupedFiles": n, "cloudOnlyFiles": cloud})
 
-    def visit(fd, node_id, depth, relative, ancestry):
+    def visit(fd, node_id, depth, relative, ancestry, in_app=False):
         nonlocal count, stopped
         initial = os.fstat(fd)
         if not initial.st_nlink or identity(initial) in directories:
@@ -141,7 +144,7 @@ def walk(root_fd, limits, emit, metadata=os.stat, enumerate_dir=os.scandir,
                         continue
                     kind = "directory" if stat.S_ISDIR(st.st_mode) else "file" if stat.S_ISREG(st.st_mode) else "symlink" if stat.S_ISLNK(st.st_mode) else "other"
                     if kind == "file" and st.st_dev == device and not skip(name):
-                        cloud = small_file(fd, name, st)
+                        cloud = small_file(fd, name, st, in_app)
                         if cloud is not None:
                             group = groups.setdefault(category(name), [0, 0, 0, 0])
                             group[0] += 1
@@ -171,7 +174,8 @@ def walk(root_fd, limits, emit, metadata=os.stat, enumerate_dir=os.scandir,
                                 gap(child_id, "changed")
                             else:
                                 visit(child_fd, child_id, depth + 1, child_relative,
-                                      ancestry + [(fd, name, identity(st))])
+                                      ancestry + [(fd, name, identity(st))],
+                                      in_app or name.lower().endswith(".app"))
                         except OSError as exc:
                             gap(child_id, "denied" if exc.errno in (errno.EACCES, errno.EPERM) else "changed")
                         finally:
