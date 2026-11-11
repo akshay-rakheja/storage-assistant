@@ -13,6 +13,7 @@ from storage_assistant.plugin import Plugin, serve
 from storage_assistant.policy import opaque
 
 ROOT = Path(__file__).resolve().parent.parent
+os.environ["STORAGE_ASSISTANT_UPDATE_CHECK"] = "0"  # plugin processes started by tests stay offline
 UI = {"extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}}}
 
 
@@ -168,6 +169,25 @@ class PluginTests(unittest.TestCase):
             self.assertNotIn(self.choice, json.dumps(result["content"]))
         self.assertIsInstance(finished["structuredContent"]["data"]["scannedAt"], (int, float))
         self.assertEqual(shown["structuredContent"]["data"]["scannedAt"], finished["structuredContent"]["data"]["scannedAt"])
+
+    def test_every_reply_about_the_folder_shows_a_view(self):
+        from storage_assistant.plugin import PLUGIN_INSTRUCTIONS, RENDER_DESCRIPTION
+        self.assertIn("Every reply about the folder shows ONE view", PLUGIN_INSTRUCTIONS)
+        self.assertNotIn("do NOT call storage_render_view", PLUGIN_INSTRUCTIONS)
+        self.assertIn("every reply", RENDER_DESCRIPTION)
+
+    def test_update_notice_reaches_the_view_only(self):
+        from storage_assistant.updates import newer
+        self.assertTrue(newer("v0.6.8", "0.6.7"))
+        self.assertTrue(newer("v0.10.0", "0.9.9"))
+        self.assertFalse(newer("v0.6.7", "0.6.7"))
+        self.assertFalse(newer("not-a-version", "0.6.7"))
+        self.assertIsNone(self.plugin.updates.available)  # tests and the default never reach the network
+        status = self.scanned(UI)
+        self.plugin.updates.available = {"version": "9.9.9", "url": "https://example.invalid/x.mcpb"}
+        result = self.rpc("tools/call", {"name": "storage_scan_status", "arguments": {"scanId": status["scanId"]}})["result"]
+        self.assertEqual(result["_meta"]["storageAssistant"]["update"]["version"], "9.9.9")
+        self.assertNotIn("9.9.9", json.dumps(result["structuredContent"]))
 
     def test_execute_via_protocol_requires_preview_token(self):
         self.scanned(UI)
@@ -458,6 +478,17 @@ class ViewReceiptTests(unittest.TestCase):
         rescan = self.function(inline, "asyncfunctionrescan()")
         self.assertIn("storage_choose_folder", rescan)
         self.assertIn("storage_start_scan", rescan)
+
+    def test_view_tries_tools_before_going_read_only(self):
+        inline = self.source("inline/app.js")
+        check = self.function(inline, "asyncfunctioncheckTools()")
+        self.assertIn("storage_list_scopes", check)
+        self.assertIn("caps.serverTools", check)
+
+    def test_view_offers_the_update(self):
+        html = (self.PKG / "inline/index.html").read_text()
+        self.assertIn('id="update"', html)
+        self.assertIn("ui/open-link", self.source("inline/app.js"))
 
     def test_suggest_button_reenables_with_the_other_controls(self):
         """A view load marks the view busy while it redraws; controls() must re-enable the button afterwards."""

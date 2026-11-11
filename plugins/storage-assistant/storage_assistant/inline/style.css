@@ -168,3 +168,5 @@ button.danger{background:none;border-color:var(--danger);color:var(--danger)}
 #view.frozen .tick,#view.frozen .pager,#view.frozen .bar,#view.frozen #rows input{display:none}
 #view.frozen #map{opacity:.6}
 #view.frozen .tile,#view.frozen #rows button{cursor:default}
+p.note{margin:0 0 10px;padding:8px 10px;border-radius:8px;font-size:13px;background:var(--raised);border:1px solid var(--line);display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+p.note[hidden]{display:none}

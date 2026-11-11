@@ -12,7 +12,7 @@
   // Codes meaning the plugin no longer holds this scan (Claude restarted, the folder grant expired, or a newer scan
   // replaced it): the view keeps the map it already has as a dated, read-only snapshot and offers Rescan.
   const LASTING = new Set(['NOT_AUTHORIZED','SCOPE_EXPIRED','STALE_SCAN','NOT_FOUND']);
-  let frozen = false, folder = null, scannedAt = null, probed = false;
+  let frozen = false, folder = null, scannedAt = null, probed = false, runningScan = null, update = null;
   const ID = /^[a-f0-9]{32}$/, BYTES = /^(0|[1-9][0-9]{0,29})$/;
   const kinds = new Set(['directory','file','symlink','other']);
   const categories = new Set(['video','audio','image','archive','document','source','other']);
@@ -92,6 +92,7 @@
     if (envelope?.data?.state === 'running' && !envelope.data.view) {
       const n = Number.isSafeInteger(envelope.data.observedEntries) ? envelope.data.observedEntries : 0;
       if (envelope.data.freeUpSpace === true) wantSuggest = true;
+      if (ID.test(envelope.data.scanId || '')) runningScan = envelope.data.scanId;
       if (!current) { status(`Scanning… ${n.toLocaleString()} entries so far. The map appears here when the scan finishes.`); follow(envelope.data.scanId); }
       return false;
     }
@@ -116,6 +117,13 @@
     return true;
   }
   function remember(data, meta) {
+    const u = meta?.update;
+    let link = null; try { link = typeof u?.url === 'string' && u.url.length < 300 ? new URL(u.url) : null; } catch {}
+    // The link comes from the plugin; the view embeds and fetches nothing, and only hands a GitHub link to the host.
+    if (!update && /^\d{1,4}\.\d{1,4}\.\d{1,4}$/.test(u?.version || '') && link?.protocol === 'https:' && link.hostname === 'github.com') {
+      update = {version:u.version, url:u.url};
+      $('update-text').textContent = `Storage Assistant ${update.version} is available.`; $('update').hidden = false; resize();
+    }
     if (typeof meta?.folder === 'string' && /^(\/|~\/)/.test(meta.folder) && meta.folder.length <= 1024) folder = meta.folder;
     if (Number.isFinite(data?.scannedAt) && data.scannedAt > 0) scannedAt = data.scannedAt;
   }
@@ -127,6 +135,25 @@
       if (e?.ok === false && LASTING.has(e.error?.code)) fail(e.error.code);
       else if (e?.ok === true && e.data?.scanVersion !== v.scanVersion) fail('STALE_SCAN');
     }).catch(() => {});
+  }
+  async function checkTools() {
+    // Some hosts let the view call the plugin without advertising it: try once before going read-only.
+    if (caps.serverTools || disposed) return;
+    try {
+      const result = await request('tools/call', {name:'storage_list_scopes', arguments:{}}, 8000);
+      if (!result?.structuredContent) throw new Error('No result');
+      caps.serverTools = {}; $('limited').hidden = true;
+      if (current) { render(); if (!probed) { probed = true; probe(current); } }
+      else if (runningScan) follow(runningScan);
+    } catch { if (!disposed) $('limited').hidden = false; }
+    finally { controls(); resize(); }
+  }
+  async function getUpdate() {
+    if (!update) return;
+    // The host opens the download in the browser; installing stays the person's click in Claude.
+    try { await request('ui/open-link', {url: update.url}); $('update-text').textContent = 'Downloading… open storage-assistant.mcpb from your Downloads folder to install it.'; $('update-get').hidden = true; }
+    catch { $('update-text').textContent = `Download the new version from ${update.url} and open it to install.`; $('update-get').hidden = true; }
+    resize();
   }
   async function rescan() {
     if (!folder || busy || acting || closing || !ready || !caps.serverTools) return;
@@ -477,6 +504,7 @@
   $('tray-review').onclick = review;
   $('suggest').onclick = suggest;
   $('rescan').onclick = rescan;
+  $('update-get').onclick = getUpdate;
   $('review-back').onclick = () => { if (acting) return; previews = null; $('review').hidden = true; renderCleanup(); resize(); };
   $('do-trash').onclick = () => execute('trash');
   $('do-evict').onclick = () => execute('evict');
@@ -570,6 +598,6 @@
     else if(current.nextCursor){more=true;shownRows=Infinity;load({cursor:current.nextCursor});}};
   window.addEventListener('message',receive);window.addEventListener('pagehide',unload);controls();
   request('ui/initialize',{protocolVersion:'2026-01-26',appInfo:{name:'storage-assistant',version:'0.2.0'},appCapabilities:{availableDisplayModes:['inline']}})
-    .then(result=>{if(disposed)return;if(typeof result?.protocolVersion!=='string')throw new Error('Unsupported UI protocol');caps=result.hostCapabilities||{};theme(result.hostContext);ready=true;notify('ui/notifications/initialized',{});status('Waiting for a scan…');controls();})
+    .then(result=>{if(disposed)return;if(typeof result?.protocolVersion!=='string')throw new Error('Unsupported UI protocol');caps=result.hostCapabilities||{};theme(result.hostContext);ready=true;notify('ui/notifications/initialized',{});status('Waiting for a scan…');controls();checkTools();})
     .catch(()=>{if(!disposed)status('MCP Apps bridge unavailable. Refresh the connection in a supported host; headless tools remain available.');});
 })();

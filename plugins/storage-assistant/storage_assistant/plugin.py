@@ -21,6 +21,7 @@ from .engine import Engine
 from .mcp import Protocol, call
 from .picker import choose_folder
 from .policy import StorageError
+from .updates import Updates
 from .server import Companion
 
 PLUGIN_INSTRUCTIONS = (
@@ -35,9 +36,11 @@ PLUGIN_INSTRUCTIONS = (
     "until the state is no longer running before answering. Never start a second scan for the same folder. Do not pass limits. "
     "If the person asks about their whole laptop or home folder, explain that one folder is scanned at a time and suggest "
     "~/Documents, ~/Downloads, ~/Desktop or a projects folder instead of opening the picker. "
-    "3) The finished scan result already shows the person a treemap, so do NOT call storage_render_view after a scan. "
-    "Answer using real names and paths from storage_query (largest_files, children, by_category; drill in with withinNodeId). "
-    "Call storage_render_view only when the person asks to see a subfolder, the other size measure or file types. "
+    "3) Every reply about the folder shows ONE view, because the interactive treemap is how the person explores and clears "
+    "space. If this reply scanned, the scan result is that view; otherwise call storage_render_view once before you answer, "
+    "opened at what you are talking about: withinNodeId for a subfolder, aggregate by_category for file types, freeUpSpace "
+    "when they want to free space. Then answer using real names and paths from storage_query (largest_files, children, "
+    "by_category; drill in with withinNodeId). "
     "Report sizes in MB/GB and describe coverage using the coverageSummary field (do not infer limits from the limits settings). "
     "Categories and age never prove something is safe to delete; allocated estimates are not reclaimable bytes. "
     "Show at most ONE view per reply: only storage_start_scan and storage_render_view show one. "
@@ -76,8 +79,8 @@ def coverage_summary(data, cloud_only=0):
             + "; ".join(parts) + "." + cloud)
 FREE_UP_SPACE = {"type": "boolean"}
 RENDER_DESCRIPTION = ("Show the person an interactive treemap and table of the scanned folder (inline in the chat where supported, "
-                      "and in the local browser view). A finished scan already shows one; use this only when the person asks to see a subfolder, "
-                      "the other size measure or file types, or with freeUpSpace when they want to free space after an earlier scan. "
+                      "and in the local browser view). Call it once in every reply about the folder that did not scan (a scan already shows "
+                      "one), opened at the subfolder or file types you discuss; with freeUpSpace when they want to free space. "
                       "Use withinNodeId to open a subfolder; selectionIds highlights items you mention.")
 
 VIEW_ONLY = "View-only: called by the Storage Assistant view after the person clicks."
@@ -176,7 +179,8 @@ class PluginProtocol(Protocol):
 
 
 class Plugin:
-    def __init__(self, chooser=choose_folder, opener=webbrowser.open):
+    def __init__(self, chooser=choose_folder, opener=webbrowser.open, check_updates=False):
+        self.updates = Updates(enabled=check_updates)
         self.engine = Engine(share_names=True, limits=PLUGIN_LIMITS, full_coverage=True)
         self.cleanup = Cleanup(self.engine, executor.Executor())
         self.companion = Companion(self.engine, cleanup=self.cleanup)
@@ -312,6 +316,8 @@ class Plugin:
             folder = "~" + grant.path[len(home):] if grant.path.startswith(home + os.sep) else grant.path
             # Tool-result _meta reaches the view only; the model sees relative paths, never where the folder is.
             result["_meta"] = {"storageAssistant": {"folder": folder}}
+            if self.updates.available:
+                result["_meta"]["storageAssistant"]["update"] = dict(self.updates.available)
             data["scannedAt"] = scan["asOf"]
         result["content"] = [{"type": "text", "text": json.dumps(result["structuredContent"], ensure_ascii=True)}]
         return result
@@ -360,6 +366,7 @@ def serve(stdin=None, stdout=None, **kwargs):
     blocks pings, UI clicks or other requests from the host."""
     stdin = stdin or sys.stdin.buffer
     stdout = stdout or sys.stdout
+    kwargs.setdefault("check_updates", os.environ.get("STORAGE_ASSISTANT_UPDATE_CHECK") != "0")
     plugin = Plugin(**kwargs)
     write_lock = threading.Lock()
     slots = threading.BoundedSemaphore(8)

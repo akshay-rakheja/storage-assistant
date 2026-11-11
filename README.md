@@ -71,7 +71,7 @@ Two **optional checks** are off until you switch them on in the view, and read a
 - **iCloud-only files** are counted at their full size but take no space on your Mac. They are never downloaded.
 - **Only your click changes anything:** moving to the Trash, deleting or removing downloads happens only when you click the button in the treemap or local view. Claude can suggest items but cannot call the actions that change files, and every item is checked again just before anything happens.
 
-Nothing is sent anywhere by Storage Assistant itself: it runs on your Mac and only talks to the Claude or ChatGPT app that started it.
+Storage Assistant runs on your Mac and only talks to the Claude or ChatGPT app that started it, with one exception: when it starts, it asks GitHub for the latest release number so the treemap can offer an update. That request carries nothing about your files or folders. To turn it off, set `STORAGE_ASSISTANT_UPDATE_CHECK=0` in the plugin's environment.
 
 "File size" and "Space on disk" can differ a lot (for sparse and cloud files), and neither tells you exactly how much deleting something will free, because macOS can share space between files.
 
