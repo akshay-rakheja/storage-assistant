@@ -77,7 +77,8 @@ class PluginTests(unittest.TestCase):
             self.assertEqual(tools[name]["_meta"], {"ui": {"visibility": ["app"]}})
             self.assertTrue(tools[name]["description"].startswith(
                 "View-only: called by the Storage Assistant view after the person clicks."))
-            self.assertFalse(tools[name]["annotations"]["readOnlyHint"])
+            # Listing candidates only reads; the other view-only tools change files or settings.
+            self.assertEqual(tools[name]["annotations"]["readOnlyHint"], name == "storage_cleanup_candidates")
         suggest = tools["storage_suggest_cleanup"]
         self.assertNotIn("_meta", suggest)
         self.assertTrue(suggest["annotations"]["readOnlyHint"])
@@ -230,6 +231,15 @@ class PluginTests(unittest.TestCase):
         result = self.rpc("tools/call", {"name": "storage_scan_status", "arguments": {"scanId": status["scanId"]}})["result"]
         self.assertEqual(result["_meta"]["storageAssistant"]["update"]["version"], "9.9.9")
         self.assertNotIn("9.9.9", json.dumps(result["structuredContent"]))
+
+    def test_only_tools_that_change_files_are_labelled_destructive(self):
+        self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": UI})
+        tools = {t["name"]: t for t in self.rpc("tools/list")["result"]["tools"]}
+        listing = tools["storage_cleanup_candidates"]
+        self.assertEqual(listing["annotations"], {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False})
+        self.assertEqual(listing["_meta"]["ui"]["visibility"], ["app"])  # still for the view only
+        for name in ("storage_cleanup_preview", "storage_cleanup_execute", "storage_cleanup_settings"):
+            self.assertTrue(tools[name]["annotations"]["destructiveHint"], name)
 
     def test_execute_via_protocol_requires_preview_token(self):
         self.scanned(UI)

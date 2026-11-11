@@ -115,6 +115,8 @@ PLUGIN_TOOLS = [
 ]
 VIEWS = ("storage_start_scan", "storage_render_view")
 APP_ONLY = {"storage_cleanup_preview", "storage_cleanup_execute", "storage_cleanup_settings", "storage_cleanup_candidates"}
+# The view-only tools that can change files or settings; listing candidates only reads.
+CHANGES = APP_ONLY - {"storage_cleanup_candidates"}
 # Hosts cap tool output (Claude Code: ~25k tokens) and drop the whole result, view included, when it is larger.
 # The assistant gets the largest suggestions plus totals; the view fetches the full list itself.
 MODEL_CANDIDATES = 20
@@ -182,13 +184,13 @@ class PluginProtocol(Protocol):
         if response and isinstance(request, dict) and request.get("method") == "tools/list" and "result" in response:
             extra = []
             for name, description, schema in PLUGIN_TOOLS:
-                changes = name in APP_ONLY
-                if changes and not self.ui_supported:
-                    # No MCP Apps view to click: the action tools do not exist for this client.
+                view_only, changes = name in APP_ONLY, name in CHANGES
+                if view_only and not self.ui_supported:
+                    # No MCP Apps view to click: the view's tools do not exist for this client.
                     continue
                 entry = {"name": name, "description": description, "inputSchema": schema,
                          "annotations": {"readOnlyHint": not changes, "destructiveHint": changes, "openWorldHint": False}}
-                if changes:
+                if view_only:
                     entry["_meta"] = {"ui": {"visibility": ["app"]}}
                 extra.append(entry)
             tools = extra + response["result"]["tools"]
