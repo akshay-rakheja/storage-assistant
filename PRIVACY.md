@@ -1,6 +1,6 @@
 # Storage Assistant privacy policy
 
-Effective 11 November 2026. Applies to Storage Assistant 0.6.9 and later.
+Effective 11 November 2026. Applies to Storage Assistant 0.6.10 and later.
 
 Storage Assistant is a plugin that runs on your Mac inside Claude Desktop, Claude Code or the ChatGPT desktop app (Codex). It has no servers, no accounts, no analytics and no telemetry.
 
