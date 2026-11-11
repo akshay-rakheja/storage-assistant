@@ -78,7 +78,9 @@ def validate(value, schema):
             validate(item, schema["items"])
     elif expected == "string":
         if len(value) > 128 or "pattern" in schema and re.fullmatch(schema["pattern"], value) is None:
-            raise StorageError("INVALID_INPUT", "Invalid opaque identifier or byte value.")
+            raise StorageError("INVALID_INPUT", "Invalid opaque identifier or byte value." + (
+                " Identifiers are 32 lowercase hex characters, for example a random UUID without dashes."
+                if schema.get("pattern") == ID["pattern"] else ""))
     elif expected in ("integer", "number"):
         if not schema.get("minimum", float("-inf")) <= value <= schema.get("maximum", float("inf")):
             raise StorageError("INVALID_INPUT", "Argument is outside the allowed bound.")

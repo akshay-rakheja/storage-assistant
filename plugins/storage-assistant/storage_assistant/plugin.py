@@ -106,12 +106,19 @@ PLUGIN_TOOLS = [
           "action": {"type": "string", "enum": ["trash", "delete", "evict"]}}, ["scanId", "scanVersion", "nodeIds", "action"])),
     ("storage_cleanup_execute", VIEW_ONLY + " Carries out a previewed cleanup plan identified by its token and returns a receipt.",
      obj({"token": ID}, ["token"])),
+    ("storage_cleanup_candidates", VIEW_ONLY + " Returns every cleanup suggestion for the snapshot shown, so the view can list "
+     "more than the few the assistant receives.",
+     obj({"scanId": ID, "scanVersion": VERSION}, ["scanId", "scanVersion"])),
     ("storage_cleanup_settings", VIEW_ONLY + " Switches optional cleanup checks on or off and can open the Trash in Finder.",
      obj({"optIn": obj({"gitHealth": {"type": "boolean"}, "exactDuplicates": {"type": "boolean"}}),
           "openTrash": {"type": "boolean"}}, ["optIn"])),
 ]
 VIEWS = ("storage_start_scan", "storage_render_view")
-APP_ONLY = {"storage_cleanup_preview", "storage_cleanup_execute", "storage_cleanup_settings"}
+APP_ONLY = {"storage_cleanup_preview", "storage_cleanup_execute", "storage_cleanup_settings", "storage_cleanup_candidates"}
+# Hosts cap tool output (Claude Code: ~25k tokens) and drop the whole result, view included, when it is larger.
+# The assistant gets the largest suggestions plus totals; the view fetches the full list itself.
+MODEL_CANDIDATES = 20
+OUTPUT_BUDGET = 60000  # characters of tool-result text; well under the host cap
 SCHEMAS = {name: schema for name, _, schema in PLUGIN_TOOLS}
 
 
@@ -136,6 +143,37 @@ def envelope(fn):
         body = {"ok": False, "error": {"code": "UNAVAILABLE", "message": "Local executor unavailable.", "retryable": False}}
     return {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=True)}],
             "structuredContent": body, "isError": not body["ok"]}
+
+
+def trim_candidates(data, keep=MODEL_CANDIDATES):
+    """Keep the largest suggestions and say how many there are in all, so the result fits the host's output cap."""
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list):
+        return data
+    data["candidatesTotal"] = len(candidates)
+    data["candidatesFreesBytes"] = str(sum(int(c.get("freesBytes") or 0) for c in candidates))
+    if len(candidates) > keep:
+        data["candidates"] = sorted(candidates, key=lambda c: -int(c.get("freesBytes") or 0))[:keep]
+        data["candidatesNote"] = (f"Showing the {keep} largest of {len(candidates)} suggestions; the view lists them all. "
+                                  "Use storage_suggest_cleanup with withinNodeId for a subfolder's.")
+    return data
+
+
+def fit(result):
+    """Backstop: a result over budget loses suggestions, then view rows, rather than the whole view."""
+    text = result.get("content", [{}])[0].get("text", "")
+    if len(text) <= OUTPUT_BUDGET or result.get("isError"):
+        return result
+    data = result["structuredContent"].get("data") or {}
+    while len(json.dumps(result["structuredContent"], ensure_ascii=True)) > OUTPUT_BUDGET:
+        if len(data.get("candidates") or []) > 1:
+            trim_candidates(data, len(data["candidates"]) // 2)
+        elif len((data.get("view") or {}).get("rows") or []) > 1:
+            data["view"]["rows"] = data["view"]["rows"][:len(data["view"]["rows"]) // 2]
+        else:
+            break
+    result["content"] = [{"type": "text", "text": json.dumps(result["structuredContent"], ensure_ascii=True)}]
+    return result
 
 
 class PluginProtocol(Protocol):
@@ -192,7 +230,7 @@ class Plugin:
 
     def invoke(self, name, args):
         started = time.monotonic()
-        result = self._invoke(name, args)
+        result = fit(self._invoke(name, args))
         # Host diagnostics: tool name, outcome, duration and whether suggestions were asked for and shown
         # (no other arguments, names or paths).
         outcome = "error " + result["structuredContent"]["error"]["code"] if result.get("isError") else "ok"
@@ -255,10 +293,12 @@ class Plugin:
             # The person asked for these checks in the conversation.
             for key, enabled in args.get("checks", {}).items():
                 self.cleanup.set_opt_in(key, enabled)
-            data = self.cleanup.suggest(args["scanId"], args["scanVersion"], args.get("withinNodeId"))
+            data = trim_candidates(self.cleanup.suggest(args["scanId"], args["scanVersion"], args.get("withinNodeId")))
             with self.cleanup.lock:
                 data["checks"] = {n: n in self.cleanup.opt_in for n in OPT_INS}
             return data
+        if name == "storage_cleanup_candidates":
+            return self.cleanup.suggest(args["scanId"], args["scanVersion"])
         if name == "storage_cleanup_preview":
             return self.cleanup.preview(args["scanId"], args["scanVersion"], args["nodeIds"], args["action"])
         if name == "storage_cleanup_execute":
@@ -278,7 +318,8 @@ class Plugin:
         data["freeUpSpace"] = True  # a still-running scan's view asks for them when it finishes
         if "view" in data:
             try:
-                data["candidates"] = self.cleanup.suggest(data["view"]["scanId"], data["view"]["scanVersion"])["candidates"]
+                data.update(trim_candidates({"candidates": self.cleanup.suggest(
+                    data["view"]["scanId"], data["view"]["scanVersion"])["candidates"]}))
             except StorageError:
                 pass
         result["content"] = [{"type": "text", "text": json.dumps(result["structuredContent"], ensure_ascii=True)}]

@@ -317,6 +317,19 @@
     for (const c of list) { if (!seen.has(c.nodeId) && c.preTicked) ticked.add(c.nodeId); seen.add(c.nodeId); }
     for (const id of [...ticked]) if (!cleanup.byId.has(id)) ticked.delete(id);
     previews = null; deleting = null; $('review').hidden = true; $('confirm-delete').hidden = true;
+    // The assistant receives only the largest suggestions; fetch the rest for this snapshot.
+    if (Number.isSafeInteger(data.candidatesTotal) && data.candidatesTotal > list.length) setTimeout(() => loadAll(v));
+  }
+  async function loadAll(v) {
+    if (!caps.serverTools || frozen) return;
+    try {
+      const result = await request('tools/call', {name:'storage_cleanup_candidates', arguments:{scanId:v.scanId,scanVersion:v.scanVersion}}, 120000);
+      const data = result?.structuredContent?.data;
+      if (result?.structuredContent?.ok !== true || !Array.isArray(data?.candidates) || Number.isSafeInteger(data.candidatesTotal)) return;
+      if (cleanup && cleanup.scanId===v.scanId && cleanup.scanVersion===v.scanVersion && !acting && !previews) {
+        candidates(data, v); renderCleanup(); resize();
+      }
+    } catch (e) { /* the largest suggestions stay listed */ }
   }
   function leaveCleanup() {
     cleanup = null; ticked = new Set(); seen = new Set(); previews = null; deleting = null; $('cleanup-status').textContent = '';

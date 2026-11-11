@@ -17,7 +17,7 @@ os.environ["STORAGE_ASSISTANT_UPDATE_CHECK"] = "0"  # plugin processes started b
 UI = {"extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}}}
 
 
-VIEW_ONLY = ("storage_cleanup_preview", "storage_cleanup_execute", "storage_cleanup_settings")
+VIEW_ONLY = ("storage_cleanup_preview", "storage_cleanup_execute", "storage_cleanup_settings", "storage_cleanup_candidates")
 
 
 class PluginTests(unittest.TestCase):
@@ -149,6 +149,48 @@ class PluginTests(unittest.TestCase):
         self.assertTrue(started["data"]["freeUpSpace"])
         if started["data"]["state"] != "running":
             self.assertIn("candidates", started["data"])
+
+    def test_many_suggestions_still_fit_the_host_output_cap(self):
+        # 129 suggestions once made a 65 KB scan result; Claude Code dropped it, view included.
+        for i in range(150):
+            modules = self.fixture / f"project-{i:03}" / "node_modules" / "pkg"
+            modules.mkdir(parents=True)
+            (modules / "index.js").write_bytes(b"x" * (1000 + i))
+            (modules.parent.parent / "package.json").write_text("{}")
+        real = self.plugin.cleanup.clock
+        self.plugin.cleanup.clock = lambda: real() + 30 * 86400  # the projects were last touched a month ago
+        self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": UI})
+        grant = self.tool("storage_choose_folder")["data"]["scopes"][0]["grantId"]
+        response = self.rpc("tools/call", {"name": "storage_start_scan",
+                                           "arguments": {"grantId": grant, "requestId": opaque(), "freeUpSpace": True}})["result"]
+        data = response["structuredContent"]["data"]
+        self.assertNotEqual(data["state"], "running")
+        self.assertIn("view", data)
+        self.assertLessEqual(len(data["candidates"]), 20)
+        self.assertGreaterEqual(data["candidatesTotal"], 150)
+        self.assertIn("candidatesNote", data)
+        self.assertLess(len(response["content"][0]["text"]), 60000)
+        sizes = [int(c["freesBytes"]) for c in data["candidates"]]
+        self.assertEqual(sizes, sorted(sizes, reverse=True))
+        snapshot = {"scanId": data["scanId"], "scanVersion": data["scanVersion"]}
+        suggested = self.tool("storage_suggest_cleanup", snapshot)
+        self.assertLessEqual(len(suggested["data"]["candidates"]), 20)
+        # The view fetches every suggestion, and can act on ones the assistant never saw.
+        everything = self.tool("storage_cleanup_candidates", snapshot)
+        self.assertTrue(everything["ok"], everything)
+        self.assertEqual(len(everything["data"]["candidates"]), data["candidatesTotal"])
+        self.assertNotIn("candidatesTotal", everything["data"])
+        shown = {c["nodeId"] for c in data["candidates"]}
+        hidden = next(c for c in everything["data"]["candidates"] if c["nodeId"] not in shown)
+        preview = self.tool("storage_cleanup_preview", snapshot | {"nodeIds": [hidden["nodeId"]], "action": "trash"})
+        self.assertTrue(preview["ok"], preview)
+
+    def test_bad_request_id_says_what_an_identifier_looks_like(self):
+        self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": UI})
+        grant = self.tool("storage_choose_folder")["data"]["scopes"][0]["grantId"]
+        started = self.tool("storage_start_scan", {"grantId": grant, "requestId": "docs-scan-1"})
+        self.assertFalse(started["ok"])
+        self.assertIn("32 lowercase hex", started["error"]["message"])
 
     def test_person_can_ask_for_optional_checks_in_chat(self):
         status = self.scanned(UI)
