@@ -328,6 +328,28 @@ class LifecycleTests(Fixture):
         self.assertEqual(caught.exception.code, "SCOPE_EXPIRED")
 
 
+    def test_keynote_decks_are_measured_but_key_files_stay_skipped(self):
+        """A .key name alone can't tell a Keynote deck from a private key; size and kind can, without reading contents."""
+        (self.root / "Pitch.key").write_bytes(b"\0" * 3_000_000)  # single-file Keynote deck
+        (self.root / "Old deck.key").mkdir()  # package-format Keynote deck
+        (self.root / "Old deck.key" / "Index.zip").write_bytes(b"\0" * 50_000)
+        (self.root / "server.key").write_bytes(b"\0" * 1_700)  # a private key is a few KB
+        (self.root / "cert.pem").write_bytes(b"\0" * 300_000)  # other credential suffixes are unchanged
+        for full in (False, True):
+            with self.subTest(full=full):
+                events = self.events(full=full)
+                nodes = {e["name"]: e for e in events if e["event"] == "node"}
+                excluded = {e["nodeId"] for e in events if e["event"] == "gap" and e["reason"] == "excluded"}
+                deck, package, key, pem = (nodes[n] for n in ("Pitch.key", "Old deck.key", "server.key", "cert.pem"))
+                self.assertNotIn(deck["nodeId"], excluded)
+                self.assertEqual((deck["category"], deck["protection"]), ("document", "review_required"))
+                self.assertNotIn(package["nodeId"], excluded)
+                self.assertIn("Index.zip", nodes)
+                self.assertIn(key["nodeId"], excluded)
+                self.assertEqual(key["protection"], "protected")
+                self.assertIn(pem["nodeId"], excluded)
+
+
 class ContractPrivacyTests(Fixture):
     def test_strict_invalid_paths_commands_and_bounds(self):
         self.scan()

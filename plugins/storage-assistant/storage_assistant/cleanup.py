@@ -339,7 +339,7 @@ class Cleanup:
                 info = os.stat(child, dir_fd=fd, follow_symlinks=False)
                 if info.st_ctime_ns >= times["started"] or info.st_mtime_ns >= times["modified"]:
                     raise _Skip(CHANGED)
-                if (skipped_in_full(child) or info.st_dev != st.st_dev or child.endswith(".icloud")
+                if (skipped_in_full(child, info) or info.st_dev != st.st_dev or child.endswith(".icloud")
                         or getattr(info, "st_flags", 0) & DATALESS):
                     raise _Skip(policy_reason)
                 child_rel = posixpath.join(rel, child)

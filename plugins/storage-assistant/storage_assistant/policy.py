@@ -38,9 +38,21 @@ def placeholder(st, name=""):
     return "no" if hasattr(st, "st_flags") else "unknown"
 
 
-def excluded(name):
+# Keynote decks share the .key suffix with private keys. Without reading contents, kind and size tell them
+# apart: a deck is a package folder or a file of at least this size; key files are a few kilobytes.
+KEYNOTE_MIN_BYTES = 64 * 1024
+
+
+def keynote(name, st):
+    return bool(st) and name.casefold().endswith(".key") and (
+        stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode) and st.st_size >= KEYNOTE_MIN_BYTES)
+
+
+def excluded(name, st=None):
     # Conservative even on case-sensitive volumes: protection never depends on
     # which spelling a caller used. Filesystem opens retain the original name.
+    if keynote(name, st):
+        return False
     name = name.casefold()
     return name in EXCLUDED or name == ".env" or name.startswith(".env.") or name.endswith((".key", ".pem", ".p12", ".keychain-db", ".sqlite", ".sqlite3", ".db"))
 
@@ -48,13 +60,15 @@ def excluded(name):
 CREDENTIALS = {".ssh", ".aws", ".azure", ".gnupg", "cloudstorage", "mobile documents"}
 
 
-def skipped_in_full(name):
+def skipped_in_full(name, st=None):
     """Full-coverage scans still skip credential stores and cloud-provider sync roots.
 
     Developer folders (.git, node_modules, .venv), Docker disk images and app
     databases are measured: their size matters for cleanup and only metadata
     is read. They keep the "protected" label so no future action targets them.
     """
+    if keynote(name, st):
+        return False
     name = name.casefold()
     return (name in CREDENTIALS or name == ".env" or name.startswith(".env.")
             or name.endswith((".key", ".pem", ".p12", ".keychain-db")))
