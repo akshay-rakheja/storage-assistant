@@ -330,7 +330,7 @@ class LifecycleTests(Fixture):
 
     def test_keynote_decks_are_measured_but_key_files_stay_skipped(self):
         """A .key name alone can't tell a Keynote deck from a private key; size and kind can, without reading contents."""
-        (self.root / "Pitch.key").write_bytes(b"\0" * 3_000_000)  # single-file Keynote deck
+        (self.root / "Pitch.key").write_bytes(b"\0" * 300_000)  # single-file Keynote deck, listed by name even under 1 MB
         (self.root / "Old deck.key").mkdir()  # package-format Keynote deck
         (self.root / "Old deck.key" / "Index.zip").write_bytes(b"\0" * 50_000)
         (self.root / "server.key").write_bytes(b"\0" * 1_700)  # a private key is a few KB
