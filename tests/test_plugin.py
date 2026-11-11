@@ -157,6 +157,18 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(self.plugin.cleanup.opt_in, {"exactDuplicates"})
         self.assertEqual(result["data"]["checks"], {"gitHealth": False, "exactDuplicates": True})
 
+    def test_scan_results_carry_folder_and_date_for_a_lasting_snapshot(self):
+        status = self.scanned(UI)
+        finished = self.rpc("tools/call", {"name": "storage_scan_status", "arguments": {"scanId": status["scanId"]}})["result"]
+        shown = self.rpc("tools/call", {"name": "storage_render_view", "arguments": {
+            "scanId": status["scanId"], "scanVersion": status["scanVersion"], "basis": "logical"}})["result"]
+        for result in (finished, shown):
+            self.assertEqual(result["_meta"]["storageAssistant"]["folder"], self.choice)  # for the view only
+            self.assertNotIn(self.choice, json.dumps(result["structuredContent"]))
+            self.assertNotIn(self.choice, json.dumps(result["content"]))
+        self.assertIsInstance(finished["structuredContent"]["data"]["scannedAt"], (int, float))
+        self.assertEqual(shown["structuredContent"]["data"]["scannedAt"], finished["structuredContent"]["data"]["scannedAt"])
+
     def test_execute_via_protocol_requires_preview_token(self):
         self.scanned(UI)
         result = self.tool("storage_cleanup_execute", {"token": "ab" * 16})
@@ -433,6 +445,19 @@ class ViewReceiptTests(unittest.TestCase):
                 self.assertIn("REFUSALS=newSet(" + self.REFUSALS + ")", text)
                 self.assertIn("refused:REFUSALS.has(", text)
                 self.assertNotIn("{refused:true}", text)
+
+    def test_snapshot_survives_a_restart_or_expired_grant(self):
+        inline = self.source("inline/app.js")
+        fail = self.function(inline, "functionfail(code)")
+        self.assertIn("LASTING.has(code)", fail)
+        self.assertIn("LASTING=newSet(['NOT_AUTHORIZED','SCOPE_EXPIRED','STALE_SCAN','NOT_FOUND'])", inline)
+        controls = self.function(inline, "functioncontrols()")
+        self.assertIn("frozen", controls)
+        html = (self.PKG / "inline/index.html").read_text()
+        self.assertIn('id="rescan"', html)
+        rescan = self.function(inline, "asyncfunctionrescan()")
+        self.assertIn("storage_choose_folder", rescan)
+        self.assertIn("storage_start_scan", rescan)
 
     def test_suggest_button_reenables_with_the_other_controls(self):
         """A view load marks the view busy while it redraws; controls() must re-enable the button afterwards."""

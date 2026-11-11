@@ -163,3 +163,8 @@ button.danger{background:none;border-color:var(--danger);color:var(--danger)}
   .tile{transition:filter .12s}
 }
 #view.receipt-only>:not(#receipt){display:none}
+#rescan{margin:0 0 12px}
+#rescan[hidden]{display:none}
+#view.frozen .tick,#view.frozen .pager,#view.frozen .bar,#view.frozen #rows input{display:none}
+#view.frozen #map{opacity:.6}
+#view.frozen .tile,#view.frozen #rows button{cursor:default}

@@ -9,6 +9,10 @@
   const UNREVOKED = 'View closed; context revocation was not acknowledged. The host may retain the previous selection. Query and share a new view before a follow-up.';
   // Codes the plugin returns before touching anything; any other failure leaves the outcome unknown.
   const REFUSALS = new Set(['INVALID_INPUT','STALE_SCAN','SCOPE_EXPIRED','NOT_AUTHORIZED','CONFLICT','UNSUPPORTED']);
+  // Codes meaning the plugin no longer holds this scan (Claude restarted, the folder grant expired, or a newer scan
+  // replaced it): the view keeps the map it already has as a dated, read-only snapshot and offers Rescan.
+  const LASTING = new Set(['NOT_AUTHORIZED','SCOPE_EXPIRED','STALE_SCAN','NOT_FOUND']);
+  let frozen = false, folder = null, scannedAt = null, probed = false;
   const ID = /^[a-f0-9]{32}$/, BYTES = /^(0|[1-9][0-9]{0,29})$/;
   const kinds = new Set(['directory','file','symlink','other']);
   const categories = new Set(['video','audio','image','archive','document','source','other']);
@@ -32,7 +36,21 @@
   }
   function status(text) { $('status').textContent = text; }
   function controls() {
-    for (const id of ['basis','aggregate','refresh','first','next','suggest']) $(id).disabled = closing || busy || acting || !ready || !current || !caps.serverTools;
+    for (const id of ['basis','aggregate','refresh','first','next','suggest']) $(id).disabled = frozen || closing || busy || acting || !ready || !current || !caps.serverTools;
+    $('rescan').hidden = !frozen || !folder || !caps.serverTools;
+    $('rescan').disabled = closing || busy || acting || !ready;
+  }
+  const when = () => scannedAt ? new Date(scannedAt*1000).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : null;
+  function freeze(code) {
+    // Keep what was measured; only the live controls stop. Nothing is stored anywhere but this message.
+    frozen = true; operation++; busy = false; following = null; rescanning = null; wantSuggest = false;
+    leaveCleanup(); known = new Map();
+    if (shared || sharing) clearContext();
+    $('view').classList.add('frozen'); render();
+    const why = {NOT_AUTHORIZED:'Claude restarted since', SCOPE_EXPIRED:'Folder access timed out'}[code] || 'A newer scan replaced it';
+    status(current ? `Snapshot${when() ? ` from ${when()}` : ''}. ${why}, so it's read-only. Rescan to see the folder as it is now.`
+      : 'This scan stopped when Claude restarted. Rescan to measure the folder again.');
+    controls(); resize();
   }
   function fail(code) {
     const messages = {
@@ -44,6 +62,7 @@
       INVALID_INPUT:'The page cursor or request is invalid. Refresh the view.',
       NOT_FOUND:'The item or resource is unavailable. Refresh the connection and current view.'
     };
+    if (LASTING.has(code) && (current || folder) && caps.serverTools) { freeze(code); return; }
     current = null; selected = null; operation++; busy = false; leaveCleanup();
     // A receipt stays until the person clicks Done or reviews again, even when the map cannot be shown.
     const keep = !$('receipt').hidden; $('view').hidden = !keep; $('view').classList.toggle('receipt-only', keep); $('rows').replaceChildren(); $('map').replaceChildren();
@@ -67,6 +86,7 @@
     if (disposed || closing) return false;
     const envelope = result?.structuredContent;
     if (envelope?.ok === false || result?.isError) { fail(envelope?.error?.code); return false; }
+    remember(envelope?.data, result?._meta?.storageAssistant);
     if (envelope?.data?.state === 'running' && !envelope.data.view) {
       const n = Number.isSafeInteger(envelope.data.observedEntries) ? envelope.data.observedEntries : 0;
       if (envelope.data.freeUpSpace === true) wantSuggest = true;
@@ -92,6 +112,35 @@
     render();
     if (wantSuggest && !rescanning) { wantSuggest = false; setTimeout(suggest); }
     return true;
+  }
+  function remember(data, meta) {
+    if (typeof meta?.folder === 'string' && /^(\/|~\/)/.test(meta.folder) && meta.folder.length <= 1024) folder = meta.folder;
+    if (Number.isFinite(data?.scannedAt) && data.scannedAt > 0) scannedAt = data.scannedAt;
+  }
+  function probe(v) {
+    // A view reopened later replays its stored result: check once that the plugin still holds this scan.
+    request('tools/call', {name:'storage_scan_status', arguments:{scanId:v.scanId}}, 60000).then(result => {
+      if (current !== v || frozen) return;
+      const e = result?.structuredContent;
+      if (e?.ok === false && LASTING.has(e.error?.code)) fail(e.error.code);
+      else if (e?.ok === true && e.data?.scanVersion !== v.scanVersion) fail('STALE_SCAN');
+    }).catch(() => {});
+  }
+  async function rescan() {
+    if (!folder || busy || acting || closing || !ready || !caps.serverTools) return;
+    busy = true; controls(); status(`Rescanning ${folder.split('/').filter(Boolean).pop() || folder}…`);
+    try {
+      const scopes = await call('storage_choose_folder', {path: folder});
+      const grantId = scopes?.scopes?.[0]?.grantId;
+      if (!ID.test(grantId || '')) throw new Error('The folder could not be opened again.');
+      const requestId = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2,'0')).join('');
+      const result = await request('tools/call', {name:'storage_start_scan', arguments:{grantId, requestId}}, 120000);
+      if (result?.structuredContent?.ok !== true) throw new Error(result?.structuredContent?.error?.message);
+      // The new scan starts its own numbering; the old snapshot gives way to it.
+      frozen = false; $('view').classList.remove('frozen'); current = null; watermark = 0; revision = 0; following = null; busy = false;
+      if (accept(result)) { operation++; probed = true; }
+    } catch (e) { busy = false; status(short(e?.message,300) ? e.message : 'The folder could not be scanned again.'); }
+    finally { busy = false; controls(); }
   }
   // Keep one progress view current: ask for status until the scan finishes, then render.
   let following = null;
@@ -152,6 +201,7 @@
     // Gap keys/counts are validated before display; host strings never become HTML.
     const words={cloud_placeholder:'iCloud-only',symlink:'link',excluded:'protected',denied:'access denied',changed:'changed while scanning',other_volume:'other disk',time_limit:'time limit reached',entry_limit:'item limit reached',depth_limit:'too deeply nested',allocation_unknown:'unknown disk usage',provider_unknown:'unknown cloud status',unsupported:'special file',metadata_delayed:'scan cut short',unavailable:'scanner error'};
     const gaps=Object.entries(v.gapCounts||{}).filter(([k,n])=>/^[a-z_]{1,40}$/.test(k)&&Number.isSafeInteger(n)&&n>0).slice(0,30);
+    $('when').textContent=when()?`Measured ${when()}.`:'';
     $('coverage').textContent=gaps.length?`Not counted: ${gaps.map(([k,n])=>`${n.toLocaleString()} ${words[k]||k.replace(/_/g,' ')}`).join(', ')}.`:'Everything in this folder was measured.';
     const lg=v.within.logicalBytes===null?0:Number(v.within.logicalBytes), al=v.within.allocatedEstimateBytes===null?0:Number(v.within.allocatedEstimateBytes);
     $('notice').textContent=[
@@ -246,7 +296,7 @@
   const sum = list => list.reduce((n,x)=>n+BigInt(x.freesBytes||'0'),0n).toString();
   const items = n => `${n.toLocaleString()} ${n===1?'item':'items'}`;
   function toggle(id, on) {
-    if (!item(id) || acting) return;
+    if (!item(id) || acting || frozen) return;
     on ? ticked.add(id) : ticked.delete(id);
     // Re-rendering replaces the controls: keep keyboard focus on the same kind of control for the same item.
     const a = document.activeElement, key = a?.dataset?.pick ? {pick:a.dataset.pick, node:a.dataset.node} : null;
@@ -276,7 +326,7 @@
   function renderCleanup() {
     const on = !!cleanup && cleanup.scanId===current?.scanId && cleanup.scanVersion===current?.scanVersion;
     // Shown until this snapshot has suggestions, so they never depend on the assistant asking for them.
-    $('suggest').hidden = on || !current || !caps.serverTools;
+    $('suggest').hidden = on || frozen || !current || !caps.serverTools;
     if (on && !cleanup.list.length && !$('cleanup-status').textContent) $('cleanup-status').textContent = 'Nothing stands out to suggest here. Tick anything you want to clear.';
     const chosen = [...ticked].map(item).filter(Boolean);
     // The bar shows only once something is ticked, and steps aside while a review or receipt is open.
@@ -410,11 +460,12 @@
   }
   async function suggest() {
     // Suggestions load when a scan asked to free space finishes, and again after a rescan; the model sees nothing new.
-    const v = current; if (!v || !caps.serverTools || acting) return;
+    const v = current; if (!v || frozen || !caps.serverTools || acting) return;
     $('cleanup-status').textContent = 'Looking for suggestions…'; busyCleanup(true);
     try {
       const result = await request('tools/call', {name:'storage_suggest_cleanup', arguments:{scanId:v.scanId,scanVersion:v.scanVersion}}, 120000);
       busyCleanup(false);
+      if (LASTING.has(result?.structuredContent?.error?.code)) { fail(result.structuredContent.error.code); return; }
       if (result?.structuredContent?.ok !== true) throw new Error(result?.structuredContent?.error?.message);
       if (current === v || current?.scanId === v.scanId && current?.scanVersion === v.scanVersion) { accept(result); $('cleanup-status').textContent = ''; }
     } catch (e) { $('cleanup-status').textContent = short(e?.message,300) ? e.message : 'Suggestions could not be refreshed.'; }
@@ -423,6 +474,7 @@
   function resize() { notify('ui/notifications/size-changed',{height:Math.min(document.documentElement.scrollHeight,2400)}); }
   $('tray-review').onclick = review;
   $('suggest').onclick = suggest;
+  $('rescan').onclick = rescan;
   $('review-back').onclick = () => { if (acting) return; previews = null; $('review').hidden = true; renderCleanup(); resize(); };
   $('do-trash').onclick = () => execute('trash');
   $('do-evict').onclick = () => execute('evict');
@@ -459,7 +511,7 @@
     return contextQueue;
   }
   async function load(overrides={},navigation=false) {
-    if(!current||busy||closing||acting||!caps.serverTools)return;
+    if(!current||frozen||busy||closing||acting||!caps.serverTools)return;
     const token=++operation,v=current;busy=true;controls();status('Loading authoritative measurements…');
     const args={scanId:v.scanId,scanVersion:v.scanVersion,basis:v.basis,withinNodeId:v.within.nodeId,aggregate:v.aggregate,pageSize:30,...overrides};
     try {
@@ -503,7 +555,7 @@
     if(m.method==='ui/resource-teardown'&&m.id!==undefined){teardown(m.id);return;}
     if(m.method==='ping'&&m.id!==undefined){window.parent.postMessage({jsonrpc:'2.0',id:m.id,result:{}},'*');return;}
     if(!ready||closing)return;
-    if(m.method==='ui/notifications/tool-result'){if(accept(m.params)){operation++;busy=false;}controls();}
+    if(m.method==='ui/notifications/tool-result'){if(accept(m.params)){operation++;busy=false;if(!probed&&caps.serverTools){probed=true;probe(current);}}controls();}
     else if(m.method==='ui/notifications/tool-cancelled')fail('CONFLICT');
     else if(m.method==='ui/notifications/host-context-changed')theme(m.params);
   }

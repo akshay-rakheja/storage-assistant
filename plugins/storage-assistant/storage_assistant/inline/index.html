@@ -3,6 +3,7 @@
 <title>Storage Assistant</title><style>/* BUNDLED_STYLE */</style></head><body>
 <main>
 <p id="status" role="status" aria-live="polite">Connecting to the host…</p>
+<button id="rescan" type="button" class="primary" hidden>Rescan</button>
 <section id="view" hidden>
 <header class="head">
 <nav id="breadcrumbs" aria-label="Folder path"></nav>
@@ -47,6 +48,6 @@
 <p id="receipt-hint" class="quiet">Use Put Back in Finder to restore</p>
 <p id="receipt-status" role="status"></p>
 </section>
-<p class="fine"><span id="coverage"></span> File contents are never opened, and nothing changes until you review and click. Sizes are estimates of the space a delete frees.</p>
+<p class="fine"><span id="when"></span> <span id="coverage"></span> File contents are never opened, and nothing changes until you review and click. Sizes are estimates of the space a delete frees.</p>
 <div id="tray" hidden><span id="tray-text"></span><button id="tray-review" type="button" class="primary">Review…</button></div>
 </section></main><script>/* BUNDLED_SCRIPT */</script></body></html>

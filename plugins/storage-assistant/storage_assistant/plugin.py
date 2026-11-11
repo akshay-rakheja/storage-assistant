@@ -8,6 +8,7 @@ assistant may name the folder (for example ~/Downloads); policy.open_root still
 refuses home, system, volume roots, protected folders, traversal and links.
 """
 import json
+import os
 import sys
 import threading
 import time
@@ -229,7 +230,7 @@ class Plugin:
                     time.sleep(.25)
                 # Totals are recomputed once, not on every wait tick.
                 result = call(self.engine, "storage_scan_status", {"scanId": scan_id}, self.companion.url)
-            return self.with_suggestions(self.with_view(result), free)
+            return self.stamp(self.with_suggestions(self.with_view(result), free))
         if name == "storage_render_view":
             # Highlight in the paired local view, then return the inline alias view.
             local = call(self.engine, name, args, self.companion.url)
@@ -241,7 +242,7 @@ class Plugin:
                     "Names, relative paths, categories, sizes and coverage reach this assistant host; file contents are never read.")
                 result["structuredContent"]["data"]["localViewAvailable"] = True
                 result["content"] = [{"type": "text", "text": json.dumps(result["structuredContent"], ensure_ascii=True)}]
-            return self.with_suggestions(result, free)
+            return self.stamp(self.with_suggestions(result, free))
         return call(self.engine, name, args, self.companion.url)
 
     def cleanup_tool(self, name, args):
@@ -295,6 +296,24 @@ class Plugin:
             return result
         body["data"]["view"] = data["view"]
         result["content"] = [{"type": "text", "text": json.dumps(body, ensure_ascii=True)}]
+        return result
+
+    def stamp(self, result):
+        """Date the result, and tell the view (not the model) which folder it shows, so a view reopened later can
+        keep a dated snapshot and rescan that folder."""
+        if result["isError"]:
+            return result
+        data = result["structuredContent"]["data"]
+        with self.engine.lock:
+            grant, scan = self.engine.grant, self.engine.scan
+            if not grant or not scan:
+                return result
+            home = os.path.expanduser("~")
+            folder = "~" + grant.path[len(home):] if grant.path.startswith(home + os.sep) else grant.path
+            # Tool-result _meta reaches the view only; the model sees relative paths, never where the folder is.
+            result["_meta"] = {"storageAssistant": {"folder": folder}}
+            data["scannedAt"] = scan["asOf"]
+        result["content"] = [{"type": "text", "text": json.dumps(result["structuredContent"], ensure_ascii=True)}]
         return result
 
     def running(self, scan_id):
