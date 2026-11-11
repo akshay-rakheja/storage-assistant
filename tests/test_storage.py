@@ -315,6 +315,19 @@ class LifecycleTests(Fixture):
         self.assertEqual(self.engine.scopes()["scopes"], [])
 
 
+    def test_access_lasts_while_the_person_keeps_using_it(self):
+        """The time limit counts from the last use, so browsing a long scan never runs it out."""
+        from storage_assistant.policy import IDLE_SECONDS
+        status = self.scan()
+        self.engine.grant.expires = time.monotonic() + 5  # nearly idle for the whole limit
+        self.engine.status(status["scanId"])  # a click in the view
+        self.assertGreater(self.engine.grant.expires, time.monotonic() + IDLE_SECONDS - 60)
+        self.engine.grant.expires = 0  # really idle: still lapses
+        with self.assertRaises(StorageError) as caught:
+            self.engine.status(status["scanId"])
+        self.assertEqual(caught.exception.code, "SCOPE_EXPIRED")
+
+
 class ContractPrivacyTests(Fixture):
     def test_strict_invalid_paths_commands_and_bounds(self):
         self.scan()

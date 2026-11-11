@@ -152,6 +152,10 @@ def open_root(path):
         raise StorageError(code, "Folder selection failed; no permissions were changed.") from None
 
 
+# Folder access lapses after this long without use; every use starts the clock again.
+IDLE_SECONDS = 3600
+
+
 @dataclass
 class Grant:
     path: str
@@ -164,18 +168,19 @@ class Grant:
     @classmethod
     def select(cls, path, limits=None):
         path, fd, root_identity = open_root(path)
-        return cls(path, fd, root_identity, opaque(), time.monotonic() + 1800,
+        return cls(path, fd, root_identity, opaque(), time.monotonic() + IDLE_SECONDS,
                    dict(limits or DEFAULT_LIMITS))
 
     def validate(self):
         if time.monotonic() >= self.expires:
-            raise StorageError("SCOPE_EXPIRED", "Select the folder again locally.")
+            raise StorageError("SCOPE_EXPIRED", "Folder access timed out after an hour unused; scan the folder again.")
         _, fresh, current = open_root(self.path)
         try:
             if current != self.root_identity or identity(os.fstat(self.fd)) != current:
                 raise StorageError("IDENTITY_CHANGED", "Selected folder identity changed; select again.")
         finally:
             os.close(fresh)
+        self.expires = time.monotonic() + IDLE_SECONDS
 
     def close(self):
         os.close(self.fd)

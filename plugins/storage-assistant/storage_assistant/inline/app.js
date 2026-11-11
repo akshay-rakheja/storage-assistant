@@ -47,15 +47,17 @@
     leaveCleanup(); known = new Map();
     if (shared || sharing) clearContext();
     $('view').classList.add('frozen'); render();
-    const why = {NOT_AUTHORIZED:'Claude restarted since', SCOPE_EXPIRED:'Folder access timed out'}[code] || 'A newer scan replaced it';
-    status(current ? `Snapshot${when() ? ` from ${when()}` : ''}. ${why}, so it's read-only. Rescan to see the folder as it is now.`
-      : 'This scan stopped when Claude restarted. Rescan to measure the folder again.');
+    const why = {NOT_AUTHORIZED:'Claude restarted the plugin or opened another folder since',
+      SCOPE_EXPIRED:'Folder access timed out after an hour unused'}[code] || 'A newer scan replaced it';
+    const next = folder ? 'Rescan' : 'Ask Claude to scan the folder again';
+    status(current ? `Snapshot${when() ? ` from ${when()}` : ''}. ${why}, so it's read-only. ${next} to see the folder as it is now.`
+      : `This scan stopped when Claude restarted the plugin. ${next} to measure the folder again.`);
     controls(); resize();
   }
   function fail(code) {
     const messages = {
-      NOT_AUTHORIZED:'No folder is authorized. Ask the assistant to have you choose a folder.',
-      SCOPE_EXPIRED:'The folder grant expired. Choose the folder again and render a new scan.',
+      NOT_AUTHORIZED:'Claude restarted the plugin or opened another folder, so this view has nothing to show. Ask Claude to scan the folder again.',
+      SCOPE_EXPIRED:'Folder access timed out after an hour unused. Ask Claude to scan the folder again.',
       STALE_SCAN:'Snapshot was replaced. Ask the assistant to query and render the current scan.',
       UNAVAILABLE:'Companion or connection is offline. Start it locally, refresh the connection, then try again.',
       CONFLICT:'The scan is still running. Poll status or deliberately cancel before rendering.',
