@@ -28,6 +28,7 @@ def build():
     OUTPUT.parent.mkdir(exist_ok=True)
     with zipfile.ZipFile(OUTPUT, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("manifest.json", json.dumps(manifest, indent=2))
+        archive.write(ROOT / "packaging/mcpb" / manifest["icon"], manifest["icon"])
         for path in files():
             archive.write(path, path.relative_to(PLUGIN))
     return OUTPUT
