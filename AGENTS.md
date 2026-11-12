@@ -35,7 +35,7 @@ Run both suites before a release; everything should pass, apart from the opt-in 
    mcp-publisher validate dist/server.json
    mcp-publisher publish dist/server.json
    ```
-   `mcp-publisher` comes from Homebrew (`brew install mcp-publisher`). If it says you are not signed in, run `mcp-publisher login github` and enter the code it prints at https://github.com/login/device. The server name is `io.github.akshay-rakheja/storage-assistant`, so only that GitHub account can publish it. Check the listing:
+   `mcp-publisher` comes from Homebrew (`brew install mcp-publisher`). The sign-in expires within minutes, so run `mcp-publisher login github` right before publishing (a 401 "token is expired" means sign in again) and enter the code it prints at https://github.com/login/device. The server name is `io.github.akshay-rakheja/storage-assistant`, so only that GitHub account can publish it. Check the listing:
    ```sh
    curl -s "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.akshay-rakheja/storage-assistant"
    ```
