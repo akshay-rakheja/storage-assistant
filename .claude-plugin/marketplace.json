@@ -10,7 +10,7 @@
     {
       "name": "storage-assistant",
       "source": "./plugins/storage-assistant",
-      "description": "Read-only storage explorer with treemap and grounded questions."
+      "description": "See what fills a folder on your Mac as a treemap, ask about it, and clear it with a click (Trash, delete or Remove Download). Nothing changes unless you click."
     }
   ]
 }
