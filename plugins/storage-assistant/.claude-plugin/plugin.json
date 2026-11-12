@@ -24,5 +24,8 @@
   },
   "homepage": "https://github.com/akshay-rakheja/storage-assistant",
   "license": "MIT",
-  "icon": ".claude-plugin/icon.png"
+  "icon": ".claude-plugin/icon.png",
+  "privacyPolicyUrl": "https://github.com/akshay-rakheja/storage-assistant/blob/main/PRIVACY.md",
+  "supportUrl": "https://github.com/akshay-rakheja/storage-assistant/issues",
+  "documentationUrl": "https://github.com/akshay-rakheja/storage-assistant#readme"
 }
