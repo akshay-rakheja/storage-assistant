@@ -40,3 +40,9 @@ Run both suites before a release; everything should pass, apart from the opt-in 
    curl -s "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.akshay-rakheja/storage-assistant"
    ```
 5. Claude Code users get the new version from `main` through the marketplace (`claude plugin update storage-assistant@storage-assistant`). Claude Desktop directory listings are updated through Anthropic's own process, not from here.
+
+## Directory listings
+
+- **Claude Code directory** (submitted 2026-11-11, managed at claude.ai › Directory › Submissions): tracks `plugins/storage-assistant` on `main`, checking about every 6 hours. Once the first version is approved, later versions that pass the checks publish automatically, so anything pushed to `main` can reach users. Keep `main` releasable. The listing reads `.claude-plugin/plugin.json` (`icon`, `privacyPolicyUrl`, `supportUrl`, `documentationUrl`) and `plugins/storage-assistant/README.md`; the listing icon was fixed at first submission. Expected policy holds for a reviewer: the local stdio server (`run.py`) and the loopback session secret in `mcp.py`.
+- **Claude Desktop extension directory** (submitted 2026-11-11 with 0.6.12 through Anthropic's Google Form): Anthropic replies only if selected.
+- **MCP Registry**: republish after every release (step 4 above).
