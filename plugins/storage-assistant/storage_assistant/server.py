@@ -87,7 +87,7 @@ class Companion(ThreadingHTTPServer):
     def service_actions(self):
         with self.engine.lock:
             if self.engine.grant and self.engine.grant.expires <= time.monotonic():
-                self.engine.release()
+                self.engine.release(expired=True)
             self.prune_export_preview()
 
     def prune_export_preview(self):

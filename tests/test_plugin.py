@@ -77,8 +77,9 @@ class PluginTests(unittest.TestCase):
             self.assertEqual(tools[name]["_meta"], {"ui": {"visibility": ["app"]}})
             self.assertTrue(tools[name]["description"].startswith(
                 "View-only: called by the Storage Assistant view after the person clicks."))
-            # Listing candidates only reads; the other view-only tools change files or settings.
-            self.assertEqual(tools[name]["annotations"]["readOnlyHint"], name == "storage_cleanup_candidates")
+            # Listing and previewing only read; execute changes files and settings changes settings.
+            self.assertEqual(tools[name]["annotations"]["readOnlyHint"],
+                             name in ("storage_cleanup_candidates", "storage_cleanup_preview"))
         suggest = tools["storage_suggest_cleanup"]
         self.assertNotIn("_meta", suggest)
         self.assertTrue(suggest["annotations"]["readOnlyHint"])
@@ -177,10 +178,18 @@ class PluginTests(unittest.TestCase):
         suggested = self.tool("storage_suggest_cleanup", snapshot)
         self.assertLessEqual(len(suggested["data"]["candidates"]), 20)
         # The view fetches every suggestion, and can act on ones the assistant never saw.
-        everything = self.tool("storage_cleanup_candidates", snapshot)
-        self.assertTrue(everything["ok"], everything)
-        self.assertEqual(len(everything["data"]["candidates"]), data["candidatesTotal"])
-        self.assertNotIn("candidatesTotal", everything["data"])
+        # A page at a time, each under the output cap, with nothing skipped between pages.
+        listed, offset = [], 0
+        while offset is not None:
+            page = self.tool("storage_cleanup_candidates", snapshot | {"offset": offset})
+            self.assertTrue(page["ok"], page)
+            self.assertEqual(page["data"]["offset"], offset)
+            self.assertLess(len(json.dumps(page, ensure_ascii=True)), 60000)
+            listed += page["data"]["candidates"]
+            offset = page["data"]["nextOffset"]
+        self.assertEqual(len(listed), data["candidatesTotal"])
+        self.assertEqual(len({c["nodeId"] for c in listed}), len(listed))
+        everything = {"data": {"candidates": listed}}
         shown = {c["nodeId"] for c in data["candidates"]}
         hidden = next(c for c in everything["data"]["candidates"] if c["nodeId"] not in shown)
         preview = self.tool("storage_cleanup_preview", snapshot | {"nodeIds": [hidden["nodeId"]], "action": "trash"})
@@ -238,8 +247,10 @@ class PluginTests(unittest.TestCase):
         listing = tools["storage_cleanup_candidates"]
         self.assertEqual(listing["annotations"], {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False})
         self.assertEqual(listing["_meta"]["ui"]["visibility"], ["app"])  # still for the view only
-        for name in ("storage_cleanup_preview", "storage_cleanup_execute", "storage_cleanup_settings"):
-            self.assertTrue(tools[name]["annotations"]["destructiveHint"], name)
+        # Preview only checks and plans; settings change no files; execute is the one that does.
+        self.assertEqual(tools["storage_cleanup_execute"]["annotations"]["destructiveHint"], True)
+        for name in ("storage_cleanup_preview", "storage_cleanup_settings"):
+            self.assertFalse(tools[name]["annotations"]["destructiveHint"], name)
 
     def test_execute_via_protocol_requires_preview_token(self):
         self.scanned(UI)
@@ -266,7 +277,7 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(self.start_result["view"]["rows"][0]["displayLabel"], "Films")
         summary = self.start_result["coverageSummary"]
         self.assertTrue(summary.startswith("Everything reachable was measured."), summary)
-        self.assertIn("1 links not followed", summary)
+        self.assertIn("1 link not followed", summary)
         self.assertNotIn("limit", summary)
         self.assertEqual(status["logicalBytes"], "37041234")
         top = self.tool("storage_query", {"scanId": status["scanId"], "scanVersion": status["scanVersion"],

@@ -53,7 +53,7 @@ test('scan result: real names, exact sizes, coverageSummary, date; text mirrors 
   const s = await h.scan(dir, { show: false });
   assert.deepEqual(JSON.parse(text(s.result)), s.result.structuredContent);
   assert.equal(s.data.state, 'partial'); assert.equal(s.data.logicalBytes, '16700010');
-  assert.equal(s.data.coverageSummary, 'Everything reachable was measured. Not counted: 2 credential folders and keys skipped (.ssh, .aws, .env, keys); 1 links not followed.');
+  assert.equal(s.data.coverageSummary, 'Everything reachable was measured. Not counted: 2 credential folders and keys skipped (.ssh, .aws, .env, keys); 1 link not followed.');
   assert.ok(Math.abs(s.data.scannedAt - Date.now() / 1000) < 60);
   const rows = Object.fromEntries(s.data.view.rows.map(r => [r.displayLabel, r]));
   assert.equal(rows.Films.bytes, '9000000'); assert.equal(rows['big.zip'].path, 'big.zip'); assert.equal(s.data.view.within.displayLabel, 'Basics');

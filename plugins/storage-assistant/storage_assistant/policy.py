@@ -162,6 +162,8 @@ def open_root(path):
         raise
     except OSError as exc:
         os.close(fd)
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            raise StorageError("NOT_FOUND", "That folder no longer exists or was moved.") from None
         code = "NOT_AUTHORIZED" if exc.errno in (errno.EACCES, errno.EPERM, errno.ELOOP) else "UNAVAILABLE"
         raise StorageError(code, "Folder selection failed; no permissions were changed.") from None
 

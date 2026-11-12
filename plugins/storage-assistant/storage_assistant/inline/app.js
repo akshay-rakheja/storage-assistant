@@ -20,8 +20,9 @@
   const bytes = x => {
     if (x === null) return 'Unknown';
     const n = Number(x), units = ['B','KB','MB','GB','TB'];
-    let i = 0, v = n; while (v >= 1000 && i < units.length-1) { v /= 1000; i++; }
-    return (i ? v.toFixed(v >= 100 ? 0 : 1) : String(n)) + ' ' + units[i];
+    const fmt = v => v.toFixed(v >= 100 ? 0 : 1);
+    let i = 0, v = n; while (i < units.length-1 && (v >= 1000 || i && Number(fmt(v)) >= 1000)) { v /= 1000; i++; }
+    return (i ? fmt(v) : String(n)) + ' ' + units[i];
   };
   const label = n => typeof n.displayLabel === 'string' && n.displayLabel.length > 0 && n.displayLabel.length <= 1024;
   function notify(method, params) { if (!disposed) window.parent.postMessage({jsonrpc:'2.0',method,params}, '*'); }
@@ -38,6 +39,8 @@
   function controls() {
     for (const id of ['basis','aggregate','refresh','first','next','suggest']) $(id).disabled = frozen || closing || busy || acting || !ready || !current || !caps.serverTools;
     $('rescan').hidden = !frozen || !folder || !caps.serverTools;
+    // Without plugin calls the map cannot open folders or tick items, so it should not look clickable.
+    $('view').classList.toggle('static', !caps.serverTools);
     $('rescan').disabled = closing || busy || acting || !ready;
   }
   const when = () => scannedAt ? new Date(scannedAt*1000).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : null;
@@ -62,7 +65,8 @@
       UNAVAILABLE:'Companion or connection is offline. Start it locally, refresh the connection, then try again.',
       CONFLICT:'The scan is still running. Poll status or deliberately cancel before rendering.',
       INVALID_INPUT:'The page cursor or request is invalid. Refresh the view.',
-      NOT_FOUND:'The item or resource is unavailable. Refresh the connection and current view.'
+      NOT_FOUND:'The item or resource is unavailable. Refresh the connection and current view.',
+      CANCELLED:'Claude stopped this request before it finished. Ask again to show the folder.'
     };
     if (LASTING.has(code) && (current || folder) && caps.serverTools) { freeze(code); return; }
     current = null; selected = null; operation++; busy = false; leaveCleanup();
@@ -78,7 +82,7 @@
   function valid(v) {
     if (!v || !ID.test(v.scanId) || !Number.isSafeInteger(v.scanVersion) || v.scanVersion<1 || !Number.isSafeInteger(v.viewRevision) || v.viewRevision<1) return false;
     if (!['logical','allocated_estimate'].includes(v.basis) || !['children','by_category'].includes(v.aggregate) || !node(v.within)) return false;
-    if (!Array.isArray(v.rows) || v.rows.length>100 || !Array.isArray(v.breadcrumbs) || v.breadcrumbs.length>9 || !v.breadcrumbs.every(node)) return false;
+    if (!Array.isArray(v.rows) || v.rows.length>100 || !Array.isArray(v.breadcrumbs) || v.breadcrumbs.length>130 || !v.breadcrumbs.every(node)) return false;
     if (!Array.isArray(v.selectionIds) || v.selectionIds.length>100 || !v.selectionIds.every(i=>typeof i==='string'&&ID.test(i))) return false;
     if (!(v.nextCursor === null || typeof v.nextCursor === 'string' && ID.test(v.nextCursor)) || !Number.isSafeInteger(v.matchingRows) || v.matchingRows<0 || v.matchingRows>40000 || !Number.isSafeInteger(v.unknownAllocationCount) || v.unknownAllocationCount<0) return false;
     if (v.evidence?.scanId!==v.scanId || v.evidence?.scanVersion!==v.scanVersion || v.evidence?.basis!==v.basis || !['partial','complete','cancelled'].includes(v.evidence.coverage)) return false;
@@ -87,13 +91,20 @@
   function accept(result) {
     if (disposed || closing) return false;
     const envelope = result?.structuredContent;
-    if (envelope?.ok === false || result?.isError) { fail(envelope?.error?.code); return false; }
+    if (envelope?.ok === false || result?.isError) {
+      if (envelope?.error?.code === 'STALE_SCAN' && rescanning) { status('Updating the map after your change…'); return false; }
+      fail(envelope?.error?.code); return false;
+    }
     remember(envelope?.data, result?._meta?.storageAssistant);
     if (envelope?.data?.state === 'running' && !envelope.data.view) {
       const n = Number.isSafeInteger(envelope.data.observedEntries) ? envelope.data.observedEntries : 0;
       if (envelope.data.freeUpSpace === true) wantSuggest = true;
       if (ID.test(envelope.data.scanId || '')) runningScan = envelope.data.scanId;
       if (!current) { status(`Scanning… ${n.toLocaleString()} entries so far. The map appears here when the scan finishes.`); follow(envelope.data.scanId); }
+      return false;
+    }
+    if (envelope?.data?.state === 'cancelled' && !envelope.data.view) {
+      if (!current) status('The scan was cancelled before anything was measured. Ask Claude to scan the folder again.');
       return false;
     }
     const data = envelope?.data, v = data?.view, suggested = Array.isArray(data?.candidates);
@@ -106,6 +117,13 @@
     }
     if (shared || sharing) clearContext();
     if (!current || current.scanId!==v.scanId || current.scanVersion!==v.scanVersion) { ticked = new Set(); known = new Map(); }
+    // A further page adds to the rows already shown; the biggest items stay at the top.
+    if (more && current && current.scanId===v.scanId && current.scanVersion===v.scanVersion && current.within.nodeId===v.within.nodeId
+        && current.basis===v.basis && current.aggregate===v.aggregate) {
+      const seen = new Set(current.rows.map(r=>r.nodeId||r.displayLabel));
+      v.rows = current.rows.concat(v.rows.filter(r=>!seen.has(r.nodeId||r.displayLabel)));
+      shownRows = current.rows.length + MORE;
+    }
     paged = more; if (!more) shownRows = FEW;
     more = false; watermark=v.scanVersion; revision=v.viewRevision; current=v;
     if (suggested) candidates(data, v);
@@ -222,19 +240,24 @@
     const metric=v.basis==='logical'?'logicalBytes':'allocatedEstimateBytes';
     const crumbs=v.breadcrumbs.map(n=>button(n.displayLabel,()=>load({withinNodeId:n.nodeId,aggregate:'children'},true)));
     if(crumbs.length)crumbs[crumbs.length-1].setAttribute('aria-current','location');
+    // Deep folders: the top folder, then the last three levels.
+    if(crumbs.length>5){const gap=element('span','…');gap.className='crumb-gap';gap.title=`${crumbs.length-4} more folders`;crumbs.splice(1,crumbs.length-4,gap);}
     $('breadcrumbs').replaceChildren(...crumbs);
-    const cut=['entry_limit','time_limit','metadata_delayed'].some(k=>(v.gapCounts||{})[k]>0);
+    const cut=['entry_limit','time_limit','metadata_delayed','cancelled'].some(k=>(v.gapCounts||{})[k]>0);
     const total=element('strong',(cut?'at least ':'')+bytes(v.within[metric]));
     const noun=v.aggregate==='children'?(v.matchingRows===1?'item':'items'):(v.matchingRows===1?'file type':'file types');
     $('summary').replaceChildren(total,document.createTextNode(`${v.basis==='logical'?'in':'on disk across'} ${v.matchingRows.toLocaleString()} ${noun}`));
     // Gap keys/counts are validated before display; host strings never become HTML.
-    const words={cloud_placeholder:'iCloud-only',symlink:'link',excluded:'protected',denied:'access denied',changed:'changed while scanning',other_volume:'other disk',time_limit:'time limit reached',entry_limit:'item limit reached',depth_limit:'too deeply nested',allocation_unknown:'unknown disk usage',provider_unknown:'unknown cloud status',unsupported:'special file',metadata_delayed:'scan cut short',unavailable:'scanner error'};
-    const gaps=Object.entries(v.gapCounts||{}).filter(([k,n])=>/^[a-z_]{1,40}$/.test(k)&&Number.isSafeInteger(n)&&n>0).slice(0,30);
+    const words={cloud_placeholder:'iCloud-only',symlink:'link',excluded:'protected',denied:'access denied',changed:'changed while scanning',other_volume:'other disk',time_limit:'time limit reached',entry_limit:'item limit reached',depth_limit:'too deeply nested',allocation_unknown:'unknown disk usage',provider_unknown:'unknown cloud status',unsupported:'special file',metadata_delayed:'scan cut short',cancelled:'scan cancelled',unavailable:'scanner error'};
+    const gaps=Object.entries(v.gapCounts||{}).filter(([k,n])=>/^[a-z_]{1,40}$/.test(k)&&k!=='cancelled'&&Number.isSafeInteger(n)&&n>0).slice(0,30);
+    const plural={symlink:'links',unsupported:'special files'};
     $('when').textContent=when()?`Measured ${when()}.`:'';
-    $('coverage').textContent=gaps.length?`Not counted: ${gaps.map(([k,n])=>`${n.toLocaleString()} ${words[k]||k.replace(/_/g,' ')}`).join(', ')}.`:'Everything in this folder was measured.';
+    $('coverage').textContent=gaps.length?`Not counted: ${gaps.map(([k,n])=>`${n.toLocaleString()} ${(n>1&&plural[k])||words[k]||k.replace(/_/g,' ')}`).join(', ')}.`:'Everything in this folder was measured.';
     const lg=v.within.logicalBytes===null?0:Number(v.within.logicalBytes), al=v.within.allocatedEstimateBytes===null?0:Number(v.within.allocatedEstimateBytes);
     $('notice').textContent=[
-      cut?'The scan stopped before the end of this folder, so these totals are too low. Try a smaller folder for complete numbers.':'',
+      v.matchingRows===0?(v.aggregate==='children'?'This folder is empty.':'No files in this folder.'):'',
+      (v.gapCounts||{}).cancelled>0?'The scan was cancelled before the end of this folder, so these totals are too low.'
+        :cut?'The scan stopped before the end of this folder, so these totals are too low. Try a smaller folder for complete numbers.':'',
       lg>al*1.25&&lg-al>100e6?`${bytes(String(Math.round(lg-al)))} of this is not stored on this Mac (iCloud-only or sparse files). ${v.basis==='logical'?'Switch to Space on disk to see what this Mac actually holds.':''}`:''
     ].filter(Boolean).join(' ');
     if(v.unknownAllocationCount)$('coverage').textContent+=` ${v.unknownAllocationCount.toLocaleString()} ${v.unknownAllocationCount===1?'file has':'files have'} unknown disk usage.`;
@@ -247,7 +270,7 @@
       name.className='name';type.className='type';size.className='size num';
       const label=element('span',r.nodeId?r.displayLabel:(CATS[r.displayLabel]||r.displayLabel));
       const c=cleanOn&&r.nodeId?cleanup.byId.get(r.nodeId):null,inside=cleanOn&&r.kind==='directory'&&!c?within(r):0;
-      if(r.nodeId){const b=button('',()=>choose(r),v.selectionIds.includes(r.nodeId));b.append(swatch(kindOf(r)),label);if(c)b.append(chip(c));
+      if(r.nodeId){const b=button('',()=>choose(r),v.selectionIds.includes(r.nodeId));b.dataset.pick='name';b.dataset.node=r.nodeId;b.append(swatch(kindOf(r)),label);if(c)b.append(chip(c));
         else if(inside){const e=element('em',`${inside} suggested inside`);e.className='chip tier-glance';b.append(e);}
         b.title=r.path||r.displayLabel;
         const pick=element('div');pick.className='pick';
@@ -267,6 +290,7 @@
       const cell=element('div');cell.className='cell';
       cell.style.cssText=`left:${t.x/W*100}%;top:${t.y/H*100}%;width:${t.w/W*100}%;height:${t.h/H*100}%`;
       const b=button('',()=>t.row.nodeId&&choose(t.row),pressed);
+      if(t.row.nodeId){b.dataset.pick='map';b.dataset.node=t.row.nodeId;}
       b.className=`tile cat-${kind}${t.w*t.h>W*H/6?' big':''}${t.w<60||t.h<40?' tiny':''}${ticked.has(t.row.nodeId)?' on':''}`;
       const title=t.row.nodeId?t.row.displayLabel:(CATS[t.row.displayLabel]||t.row.displayLabel);
       b.append(element('strong',title),element('span',bytes(t.row.bytes)));
@@ -290,13 +314,16 @@
   // Candidates come from storage_suggest_cleanup. Only the person acts: ticks,
   // Review… (preview per action, one-time tokens), then one execute per click.
   // The executor revalidates everything; the view only shows and forwards ids.
-  const TIERS = {safe:'Safe to clear',glance:'Worth a glance',call:'Your call'};
+  const TIERS = {safe:'Safe to clear',glance:'Worth a glance',your_call:'Your call'};  // the plugin's tier names (signals.py)
   const ACTIONS = ['trash','evict','delete'];
-  let cleanup = null, reviewing = [], ticked = new Set(), seen = new Set(), previews = null, acting = false, resuggest = false, rescanning = null, deleting = null;
+  let cleanup = null, reviewing = [], ticked = new Set(), seen = new Set(), previews = null, acting = false, resuggest = false, rescanning = null, deleting = null, returnTo = null, quiet = false;
   // Anything the person ticks themselves can go to the Trash; suggestions may also offer Delete permanently or Remove Download.
   let known = new Map(), wantSuggest = false, shownRows = 8, more = false, paged = false;
   const FEW = 8, MORE = 20;
-  const pickable = r => !!r?.nodeId && (r.kind==='file' || r.kind==='directory') && !r.groupedFiles && label(r) && short(r.path,4096);
+  // Same rule the plugin applies before it offers an action: a suggestion is always offered;
+  // otherwise protected items and items the scan skipped or could not fully read are not.
+  const pickable = r => !!r?.nodeId && (r.kind==='file' || r.kind==='directory') && !r.groupedFiles && label(r) && short(r.path,4096)
+    && (!!cleanup?.byId?.get(r.nodeId) || r.protection!=='protected' && !(Array.isArray(r.gaps) && r.gaps.some(g=>g!=='symlink')));
   const rowItem = r => ({nodeId:r.nodeId,displayLabel:r.displayLabel,path:r.path,tier:null,preTicked:false,reasons:[],actions:['trash'],
     freesBytes:r.allocatedEstimateBytes ?? r.logicalBytes ?? '0'});
   const item = id => cleanup?.byId.get(id) || known.get(id);
@@ -314,7 +341,9 @@
     const fresh = !cleanup || cleanup.scanId!==v.scanId || cleanup.scanVersion!==v.scanVersion;
     if (fresh) { ticked = new Set(); seen = new Set(); }
     cleanup = {scanId:v.scanId,scanVersion:v.scanVersion,list,byId:new Map(list.map(c=>[c.nodeId,c]))};
-    for (const c of list) { if (!seen.has(c.nodeId) && c.preTicked) ticked.add(c.nodeId); seen.add(c.nodeId); }
+    // Suggestions refreshed after an action are listed, not ticked: only the person's own ticks carry over.
+    for (const c of list) { if (!seen.has(c.nodeId) && c.preTicked && !quiet) ticked.add(c.nodeId); seen.add(c.nodeId); }
+    quiet = false;
     for (const id of [...ticked]) if (!cleanup.byId.has(id)) ticked.delete(id);
     previews = null; deleting = null; $('review').hidden = true; $('confirm-delete').hidden = true;
     // The assistant receives only the largest suggestions; fetch the rest for this snapshot.
@@ -322,12 +351,18 @@
   }
   async function loadAll(v) {
     if (!caps.serverTools || frozen) return;
+    const all = [];
     try {
-      const result = await request('tools/call', {name:'storage_cleanup_candidates', arguments:{scanId:v.scanId,scanVersion:v.scanVersion}}, 120000);
-      const data = result?.structuredContent?.data;
-      if (result?.structuredContent?.ok !== true || !Array.isArray(data?.candidates) || Number.isSafeInteger(data.candidatesTotal)) return;
+      // The full list comes a page at a time, each well under the host's size limit.
+      for (let offset = 0, pages = 0; offset !== null && pages < 50; pages++) {
+        const result = await request('tools/call', {name:'storage_cleanup_candidates', arguments:{scanId:v.scanId,scanVersion:v.scanVersion,offset}}, 120000);
+        const data = result?.structuredContent?.data;
+        if (result?.structuredContent?.ok !== true || !Array.isArray(data?.candidates) || data.offset !== offset) return;
+        all.push(...data.candidates);
+        offset = Number.isSafeInteger(data.nextOffset) && data.nextOffset > offset ? data.nextOffset : null;
+      }
       if (cleanup && cleanup.scanId===v.scanId && cleanup.scanVersion===v.scanVersion && !acting && !previews) {
-        candidates(data, v); renderCleanup(); resize();
+        candidates({candidates:all}, v); renderCleanup(); render(); resize();
       }
     } catch (e) { /* the largest suggestions stay listed */ }
   }
@@ -474,7 +509,7 @@
     const done = (Array.isArray(r?.done) ? r.done : []).filter(label).slice(0,500), a = r?.action;
     for (const id of ['review','confirm-delete']) $(id).hidden = true;
     $('receipt').hidden = false; $('check-refresh').hidden = true;
-    $('receipt-title').textContent = a==='trash' ? 'Moved to the Trash' : a==='evict' ? 'Downloads removed' : 'Deleted';
+    $('receipt-title').textContent = !done.length ? 'No changes made' : a==='trash' ? 'Moved to the Trash' : a==='evict' ? 'Downloads removed' : 'Deleted';
     const est = validBytes(r?.freedEstimateBytes) && r.freedEstimateBytes ? bytes(r.freedEstimateBytes) : 'an unknown amount';
     $('receipt-summary').textContent = done.length ? (a==='trash' ? `Moved ${items(done.length)} to the Trash (about ${est}).` : a==='evict' ? `Removed ${done.length===1?'1 download':done.length.toLocaleString()+' downloads'} from this Mac (about ${est}); they stay in iCloud.` : `Deleted ${items(done.length)} (about ${est}).`) : 'Nothing was changed.';
     $('receipt-done').replaceChildren(...done.map(d => { const li = element('li'); li.append(who(d.displayLabel, short(d.path,4096)?d.path:''), element('span', validBytes(d.freesBytes)&&d.freesBytes?bytes(d.freesBytes):'')); li.lastChild.className = 'amt'; return li; }));
@@ -487,7 +522,8 @@
     const trashed = a==='trash' && done.length > 0;
     $('open-trash').hidden = !trashed; $('receipt-hint').hidden = !trashed;
     if (r?.rescan?.started && ID.test(r.rescan.scanId||'')) {
-      $('receipt-status').textContent = 'Updating the map…'; resuggest = true; rescanning = r.rescan.scanId; following = null; follow(r.rescan.scanId);
+      $('receipt-status').textContent = 'Updating the map…'; resuggest = !!cleanup; returnTo = current?.within?.path || null;
+      rescanning = r.rescan.scanId; following = null; follow(r.rescan.scanId);
     } else $('receipt-status').textContent = done.length ? 'Refresh to update the map.' : '';
     $('receipt-title').focus();
   }
@@ -496,9 +532,20 @@
     try { await call('storage_cleanup_settings', {optIn:{}, openTrash:true}); $('receipt-status').textContent = 'The Trash is open in Finder.'; }
     catch (e) { $('receipt-status').textContent = e.message; }
   }
-  function afterRescan(ok) {
+  async function afterRescan(ok) {
+    const path = returnTo; returnTo = null;
+    if (ok && path && path !== '.') await reopen(path);
     $('receipt-status').textContent = ok ? 'The map now shows the folder after this change.' : 'Refresh to update the map.';
-    if (ok && resuggest) { resuggest = false; suggest(); }
+    if (ok && resuggest) { resuggest = false; quiet = true; suggest(); }
+  }
+  async function reopen(path) {
+    // Folder ids belong to one scan: find the same folder again by its path, one level at a time.
+    const parts = path.split('/');
+    for (let i = 1; i <= parts.length; i++) {
+      const p = parts.slice(0,i).join('/'), row = current?.rows.find(r => r.kind==='directory' && r.path===p);
+      if (!row || frozen) return;
+      await load({withinNodeId:row.nodeId,aggregate:'children'}, true);
+    }
   }
   async function suggest() {
     // Suggestions load when a scan asked to free space finishes, and again after a rescan; the model sees nothing new.
@@ -511,7 +558,7 @@
       if (result?.structuredContent?.ok !== true) throw new Error(result?.structuredContent?.error?.message);
       if (current === v || current?.scanId === v.scanId && current?.scanVersion === v.scanVersion) { accept(result); $('cleanup-status').textContent = ''; }
     } catch (e) { $('cleanup-status').textContent = short(e?.message,300) ? e.message : 'Suggestions could not be refreshed.'; }
-    finally { busyCleanup(false); renderCleanup(); resize(); }
+    finally { quiet = false; busyCleanup(false); renderCleanup(); resize(); }
   }
   function resize() { notify('ui/notifications/size-changed',{height:Math.min(document.documentElement.scrollHeight,2400)}); }
   $('tray-review').onclick = review;
@@ -555,13 +602,24 @@
   }
   async function load(overrides={},navigation=false) {
     if(!current||frozen||busy||closing||acting||!caps.serverTools)return;
-    const token=++operation,v=current;busy=true;controls();status('Loading authoritative measurements…');
+    const token=++operation,v=current,a=document.activeElement,keyboard=a&&a!==document.body&&$('view').contains(a);
+    busy=true;controls();status('Loading…');
     const args={scanId:v.scanId,scanVersion:v.scanVersion,basis:v.basis,withinNodeId:v.within.nodeId,aggregate:v.aggregate,pageSize:30,...overrides};
     try {
-      const result=await request('tools/call',{name:'storage_render_view',arguments:args});
+      let result=await request('tools/call',{name:'storage_render_view',arguments:args},30000);
       if(disposed||token!==operation)return;
-      if(accept(result)&&navigation&&shared)clearContext();
-    } catch { if(token===operation)fail('UNAVAILABLE'); }
+      // An old or unknown page marker: start again from the first page instead of losing the view.
+      if(overrides.cursor&&result?.structuredContent?.error?.code==='INVALID_INPUT'){
+        more=false;const {cursor,...rest}=args;result=await request('tools/call',{name:'storage_render_view',arguments:rest},30000);
+        if(disposed||token!==operation)return;}
+      const ok=accept(result);
+      if(ok&&navigation&&shared)clearContext();
+      if(ok&&keyboard&&(document.activeElement===document.body||!document.activeElement))
+        (document.querySelector('#map .tile:not(:disabled)')||document.querySelector('#breadcrumbs [aria-current]'))?.focus();
+    } catch {
+      // A slow or lost answer keeps the map that is already shown.
+      if(token===operation){if(current&&!frozen)status('The plugin did not answer in time. Try again.');else fail('UNAVAILABLE');}
+    }
     finally{if(token===operation){busy=false;controls();}}
   }
   function dispose(message=CLOSED) {
@@ -599,7 +657,7 @@
     if(m.method==='ping'&&m.id!==undefined){window.parent.postMessage({jsonrpc:'2.0',id:m.id,result:{}},'*');return;}
     if(!ready||closing)return;
     if(m.method==='ui/notifications/tool-result'){if(accept(m.params)){operation++;busy=false;if(!probed&&caps.serverTools){probed=true;probe(current);}}controls();}
-    else if(m.method==='ui/notifications/tool-cancelled')fail('CONFLICT');
+    else if(m.method==='ui/notifications/tool-cancelled'){if(current)status('Claude stopped that request; this is the last result.');else{fail('CANCELLED');}}
     else if(m.method==='ui/notifications/host-context-changed')theme(m.params);
   }
   $('basis').onchange=()=>load({basis:$('basis').value},true);
@@ -608,7 +666,7 @@
   // Show a few rows first; reveal the loaded rows in steps, then fetch the next page.
   $('first').onclick=()=>{if(!current)return;if(paged)load();else{shownRows=FEW;render();}};
   $('next').onclick=()=>{if(!current)return;if(current.rows.length>shownRows){shownRows+=MORE;render();}
-    else if(current.nextCursor){more=true;shownRows=Infinity;load({cursor:current.nextCursor});}};
+    else if(current.nextCursor){more=true;load({cursor:current.nextCursor});}};
   window.addEventListener('message',receive);window.addEventListener('pagehide',unload);controls();
   request('ui/initialize',{protocolVersion:'2026-01-26',appInfo:{name:'storage-assistant',version:'0.2.0'},appCapabilities:{availableDisplayModes:['inline']}})
     .then(result=>{if(disposed)return;if(typeof result?.protocolVersion!=='string')throw new Error('Unsupported UI protocol');caps=result.hostCapabilities||{};theme(result.hostContext);ready=true;notify('ui/notifications/initialized',{});status('Waiting for a scan…');controls();checkTools();})

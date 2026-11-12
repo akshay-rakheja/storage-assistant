@@ -62,21 +62,31 @@ GAP_WORDS = {"cloud_placeholder": "iCloud-only items not downloaded (they use no
              "allocation_unknown": "files with unknown disk usage", "provider_unknown": "items with unknown cloud status",
              "unsupported": "special files skipped", "metadata_delayed": "scan was cut short",
              "unavailable": "scanner errors"}
+GAP_ONE = {"cloud_placeholder": "iCloud-only item not downloaded (it uses no local space)", "symlink": "link not followed",
+           "denied": "item macOS denied access to", "changed": "item that changed during the scan",
+           "other_volume": "other disk not crossed", "depth_limit": "folder deeper than the depth limit",
+           "allocation_unknown": "file with unknown disk usage", "provider_unknown": "item with unknown cloud status",
+           "unsupported": "special file skipped", "unavailable": "scanner error"}
 
 
 def coverage_summary(data, cloud_only=0):
     """Plain-language coverage so the model does not mistake configured limits for limits hit."""
     gaps = data.get("gapCounts") or {}
-    cloud = (f" {cloud_only:,} iCloud-only files are counted at their full size but take no space on this Mac."
-             if cloud_only else "")
+    cloud = ("" if not cloud_only else " 1 iCloud-only file is counted at its full size but takes no space on this Mac."
+             if cloud_only == 1 else f" {cloud_only:,} iCloud-only files are counted at their full size but take no space on this Mac.")
     if data.get("state") == "running":
         return f"Still scanning: {data.get('observedEntries', 0):,} items so far."
     if not gaps:
         return "Complete: every item in the folder was measured." + cloud
-    parts = [f"{count:,} {GAP_WORDS.get(reason, reason.replace('_', ' '))}" for reason, count in sorted(gaps.items())]
-    stopped = any(r in gaps for r in ("time_limit", "entry_limit", "metadata_delayed"))
-    return (("Stopped early; totals are a lower bound. " if stopped else "Everything reachable was measured. Not counted: ")
-            + "; ".join(parts) + "." + cloud)
+    words = lambda reason, count: (GAP_ONE if count == 1 else GAP_WORDS).get(reason) or GAP_WORDS.get(reason, reason.replace("_", " "))
+    parts = [f"{count:,} {words(reason, count)}" for reason, count in sorted(gaps.items()) if reason != "cancelled"]
+    if data.get("state") == "cancelled" or "cancelled" in gaps:
+        lead = "Cancelled before the end; totals are a lower bound."
+    elif any(r in gaps for r in ("time_limit", "entry_limit", "metadata_delayed")):
+        lead = "Stopped early; totals are a lower bound."
+    else:
+        return "Everything reachable was measured. Not counted: " + "; ".join(parts) + "." + cloud
+    return lead + (" Not counted: " + "; ".join(parts) + "." if parts else "") + cloud
 FREE_UP_SPACE = {"type": "boolean"}
 RENDER_DESCRIPTION = ("Show the person an interactive treemap and table of the scanned folder (inline in the chat where supported, "
                       "and in the local browser view). Call it once in every reply about the folder that did not scan (a scan already shows "
@@ -106,9 +116,10 @@ PLUGIN_TOOLS = [
           "action": {"type": "string", "enum": ["trash", "delete", "evict"]}}, ["scanId", "scanVersion", "nodeIds", "action"])),
     ("storage_cleanup_execute", VIEW_ONLY + " Carries out a previewed cleanup plan identified by its token and returns a receipt.",
      obj({"token": ID}, ["token"])),
-    ("storage_cleanup_candidates", VIEW_ONLY + " Returns every cleanup suggestion for the snapshot shown, so the view can list "
-     "more than the few the assistant receives.",
-     obj({"scanId": ID, "scanVersion": VERSION}, ["scanId", "scanVersion"])),
+    ("storage_cleanup_candidates", VIEW_ONLY + " Returns every cleanup suggestion for the snapshot shown, a page at a time "
+     "(nextOffset), so the view can list more than the few the assistant receives.",
+     obj({"scanId": ID, "scanVersion": VERSION, "offset": {"type": "integer", "minimum": 0, "maximum": 1000000}},
+         ["scanId", "scanVersion"])),
     ("storage_cleanup_settings", VIEW_ONLY + " Switches optional cleanup checks on or off and can open the Trash in Finder.",
      obj({"optIn": obj({"gitHealth": {"type": "boolean"}, "exactDuplicates": {"type": "boolean"}}),
           "openTrash": {"type": "boolean"}}, ["optIn"])),
@@ -116,7 +127,8 @@ PLUGIN_TOOLS = [
 VIEWS = ("storage_start_scan", "storage_render_view")
 APP_ONLY = {"storage_cleanup_preview", "storage_cleanup_execute", "storage_cleanup_settings", "storage_cleanup_candidates"}
 # The view-only tools that can change files or settings; listing candidates only reads.
-CHANGES = APP_ONLY - {"storage_cleanup_candidates"}
+CHANGES = {"storage_cleanup_execute", "storage_cleanup_settings"}  # not read-only (settings, or files)
+DESTRUCTIVE = {"storage_cleanup_execute"}  # the only tool that changes files; preview only checks and plans
 # Hosts cap tool output (Claude Code: ~25k tokens) and drop the whole result, view included, when it is larger.
 # The assistant gets the largest suggestions plus totals; the view fetches the full list itself.
 MODEL_CANDIDATES = 20
@@ -161,6 +173,21 @@ def trim_candidates(data, keep=MODEL_CANDIDATES):
     return data
 
 
+def candidate_page(data, offset, budget=OUTPUT_BUDGET * 3 // 4):
+    """One page of the full suggestion list that fits the output budget; nextOffset is null on the last page."""
+    candidates = data.get("candidates") or []
+    page, used = [], 0
+    for c in candidates[offset:]:
+        size = len(json.dumps(c, ensure_ascii=True)) + 1
+        if page and used + size > budget:
+            break
+        page.append(c)
+        used += size
+    end = offset + len(page)
+    return {**data, "candidates": page, "offset": offset, "total": len(candidates),
+            "nextOffset": end if end < len(candidates) else None}
+
+
 def fit(result):
     """Backstop: a result over budget loses suggestions, then view rows, rather than the whole view."""
     text = result.get("content", [{}])[0].get("text", "")
@@ -184,12 +211,12 @@ class PluginProtocol(Protocol):
         if response and isinstance(request, dict) and request.get("method") == "tools/list" and "result" in response:
             extra = []
             for name, description, schema in PLUGIN_TOOLS:
-                view_only, changes = name in APP_ONLY, name in CHANGES
+                view_only, changes, destructive = name in APP_ONLY, name in CHANGES, name in DESTRUCTIVE
                 if view_only and not self.ui_supported:
                     # No MCP Apps view to click: the view's tools do not exist for this client.
                     continue
                 entry = {"name": name, "description": description, "inputSchema": schema,
-                         "annotations": {"readOnlyHint": not changes, "destructiveHint": changes, "openWorldHint": False}}
+                         "annotations": {"readOnlyHint": not changes, "destructiveHint": destructive, "openWorldHint": False}}
                 if view_only:
                     entry["_meta"] = {"ui": {"visibility": ["app"]}}
                 extra.append(entry)
@@ -300,7 +327,7 @@ class Plugin:
                 data["checks"] = {n: n in self.cleanup.opt_in for n in OPT_INS}
             return data
         if name == "storage_cleanup_candidates":
-            return self.cleanup.suggest(args["scanId"], args["scanVersion"])
+            return candidate_page(self.cleanup.suggest(args["scanId"], args["scanVersion"]), args.get("offset", 0))
         if name == "storage_cleanup_preview":
             return self.cleanup.preview(args["scanId"], args["scanVersion"], args["nodeIds"], args["action"])
         if name == "storage_cleanup_execute":

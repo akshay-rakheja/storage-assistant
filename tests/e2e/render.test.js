@@ -182,7 +182,7 @@ test('a scan that hit the item limit says totals are too low', withHost(async h 
 test('iCloud-only placeholder files are named in the coverage line', withHost(async h => {
   const s = await h.scan(await h.fixture({ name: 'Cloud', age: 30, entries: [{ p: '.report.pdf.icloud', size: 100 }, { p: 'here.zip', size: 4000 }] }));
   assert.match(await h.text('coverage'), /1 iCloud-only/);
-  assert.match(s.data.coverageSummary, /1 iCloud-only items not downloaded/);
+  assert.match(s.data.coverageSummary, /1 iCloud-only item not downloaded/);
 }));
 
 test('a hard-linked file is counted once', withHost(async h => {

@@ -321,7 +321,7 @@ test('Remove Download (iCloud) flow with a stand-in for iCloud: offer, button, a
   assert.equal(await h.text('do-evict'), 'Remove 1 download (keep in iCloud)');
   assert.deepEqual([await h.hidden('do-trash'), await h.hidden('do-delete')], [true, true]);
   await h.view.click('#do-evict'); await receiptShown(h);
-  assert.equal(await h.text('receipt-title'), 'Downloads removed');
+  assert.equal(await h.text('receipt-title'), 'No changes made');
   assert.equal(await h.text('receipt-summary'), 'Nothing was changed.');
   assert.deepEqual(await list(h, 'receipt-failed'), ['holiday.mov: macOS did not confirm the download was removed']);
   assert.ok((await h.ctl('exists', { path: dir + '/holiday.mov' })).exists);
@@ -343,6 +343,6 @@ test('a folder with hundreds of suggestions lists them all in the view', withHos
   assert.equal(s.data.candidatesTotal, 300); assert.equal(s.data.candidates.length, 20);
   await h.view.waitForFunction(() => /selected/.test(document.getElementById('tray-text').textContent));
   await sleep(1500);
-  assert.equal((await h.calls('storage_cleanup_candidates')).length, 1, 'the view asks for the full list');
+  assert.ok((await h.calls('storage_cleanup_candidates')).length >= 1, 'the view asks for the full list (a page at a time)');
   assert.match(await h.text('tray-text'), /^300 items selected/, 'every safe suggestion is pre-ticked, not only the 20 the assistant was told about');
 }));

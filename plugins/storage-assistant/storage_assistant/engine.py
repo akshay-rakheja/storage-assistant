@@ -10,6 +10,7 @@ import time
 from .policy import Grant, StorageError, opaque, validate_limits, POLICY_VERSION
 
 CAVEATS = [
+    "Categories are extension hints; no content inspection and no disposal inference.",
     "Observed regular-file bytes only; directory overhead and omitted entries are not included.",
     "Hardlink bytes are counted once, assigned to the lexically first observed relative path.",
     "Allocated estimate uses st_blocks × 512; APFS clones, compression and snapshots prevent exclusive physical attribution.",
@@ -18,6 +19,8 @@ CAVEATS = [
     "A metadata snapshot is not atomic. Directory movement after validation has a residual read race.",
 ]
 
+
+PAGE_BUDGET = 52000  # characters of rows (and their evidence) per page; tool results stay under 60,000
 
 class Engine:
     def __init__(self, share_names=False, limits=None, full_coverage=False):
@@ -36,6 +39,7 @@ class Engine:
         self.view = {}
         self.view_revision = 0
         self.closed = False
+        self.expired = False  # the last folder was let go after an hour unused
 
     def select(self, path):
         new_grant = Grant.select(path, self.limits)
@@ -45,12 +49,15 @@ class Engine:
             return self.scopes()
 
     def authorize(self, grant_id=None):
+        if not self.closed and not self.grant and self.expired:
+            # The folder was let go because it sat unused; say so rather than "select a folder".
+            raise StorageError("SCOPE_EXPIRED", "Folder access timed out after an hour unused; scan the folder again.")
         if self.closed or not self.grant or grant_id and self.grant.grant_id != grant_id:
             raise StorageError("NOT_AUTHORIZED", "Select one folder in the local companion first.")
         try:
             self.grant.validate()
-        except StorageError:
-            self.release()
+        except StorageError as e:
+            self.release(expired=e.code == "SCOPE_EXPIRED")
             raise
         return self.grant
 
@@ -63,10 +70,11 @@ class Engine:
                                 "mode": "metadata_only", "expiresInSeconds": max(0, int(grant.expires - time.monotonic())),
                                 "limits": grant.limits}], "policyVersion": POLICY_VERSION}
 
-    def release(self, grant_id=None):
+    def release(self, grant_id=None, expired=False):
         with self.lock:
             if grant_id and (not self.grant or self.grant.grant_id != grant_id):
                 raise StorageError("NOT_AUTHORIZED", "Unknown scope.")
+            self.expired = expired and self.grant is not None
             self._stop_process()
             if self.grant:
                 self.grant.close()
@@ -264,7 +272,6 @@ class Engine:
                 "coverage", "placeholder", "protection", "hardlinkAliasOf", "gaps", "measuredAt")
         result = {k: node[k] for k in keys}
         result["displayLabel"] = node["name"] if named else ("Selected folder" if node["parentId"] is None else node["kind"].capitalize() + " " + node["nodeId"][:6])
-        result["categoryEvidence"] = ["Extension hint v1; no content inspection and no disposal inference."]
         if local:
             result["itemLogicalBytes"] = node["rawLogicalBytes"]
         if "groupedFiles" in node:
@@ -331,7 +338,7 @@ class Engine:
                 grouping = "category" if operation == "by_category" else "kind"
                 for n in candidates:
                     group = groups.setdefault(n[grouping], {"displayLabel": n[grouping], "bytes": "0", "count": 0, "unknownAllocationCount": 0})
-                    group["count"] += 1
+                    group["count"] += int(n.get("groupedFiles") or 1)
                     if n["kind"] != "file":
                         continue  # directory sums overlap regular-file contributions
                     if n[metric] is None:
@@ -345,7 +352,9 @@ class Engine:
             else:
                 rows = [self.summary(n, local) | {"bytes": n[metric]} for n in candidates]
             rows.sort(key=lambda r: (r["bytes"] is None, -int(r["bytes"] or 0), r.get("nodeId", r["displayLabel"])))
-            fingerprint = json.dumps({k: v for k, v in args.items() if k != "cursor"}, sort_keys=True)
+            # Defaults are filled in, so a page asked for with them spelled out matches the page that made the cursor.
+            fingerprint = json.dumps({k: v for k, v in args.items() if k != "cursor"} | {
+                "withinNodeId": within, "aggregate": operation, "pageSize": args.get("pageSize", 30)}, sort_keys=True)
             offset = 0
             if "cursor" in args:
                 saved = self.cursors.get(args["cursor"])
@@ -353,11 +362,19 @@ class Engine:
                     raise StorageError("INVALID_INPUT", "Cursor is expired or belongs to another query.")
                 offset = saved[1]
             size = args.get("pageSize", 30)
-            page = rows[offset:offset + size]
+            # Long names (non-Latin ones are six times longer once escaped) end a page early, so a page
+            # always fits the tool-result budget and the next page starts right after the last row sent.
+            page, used = [], 0
+            for row in rows[offset:offset + size]:
+                used += len(json.dumps(row, ensure_ascii=True)) + 40  # the row, and its id in the evidence
+                if page and used > PAGE_BUDGET:
+                    break
+                page.append(row)
+            end = offset + len(page)
             cursor = None
-            if offset + size < len(rows):
+            if end < len(rows):
                 cursor = opaque()
-                self.cursors[cursor] = (fingerprint, offset + size, time.monotonic() + 120)
+                self.cursors[cursor] = (fingerprint, end, time.monotonic() + 3600)  # a view stays open a while
                 while len(self.cursors) > 128:
                     self.cursors.popitem(last=False)
             ids = [r["nodeId"] for r in page if "nodeId" in r]
