@@ -19,12 +19,10 @@
       "args": [
         "${CLAUDE_PLUGIN_ROOT}/run.py",
         "plugin"
-      ],
-      "env": {
-        "PYTHONDONTWRITEBYTECODE": "1"
-      }
+      ]
     }
   },
   "homepage": "https://github.com/akshay-rakheja/storage-assistant",
-  "license": "MIT"
+  "license": "MIT",
+  "icon": ".claude-plugin/icon.png"
 }

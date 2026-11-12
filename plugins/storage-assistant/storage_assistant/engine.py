@@ -122,7 +122,8 @@ class Engine:
             self.requests[request_id] = (scan["scanId"], key)
             while len(self.requests) > 32:
                 self.requests.popitem(last=False)
-            env = {k: v for k, v in os.environ.items() if k in ("PATH", "LANG", "TMPDIR", "SYSTEMROOT")}
+            # The worker gets only these four variables, nothing else from the environment.
+            env = {k: os.environ[k] for k in ("PATH", "LANG", "TMPDIR", "SYSTEMROOT") if k in os.environ}
             env["PYTHONDONTWRITEBYTECODE"] = "1"
             proc = subprocess.Popen([sys.executable, "-m", "storage_assistant.worker", "--fd", str(grant.fd),
                                      "--limits", json.dumps(selected_limits)] + (["--full"] if self.full_coverage else []),
